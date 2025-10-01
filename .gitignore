@@ -3,5 +3,5 @@ data
 .idea
 *.xml
 *.json
-*.txt
+token.txt
 .env

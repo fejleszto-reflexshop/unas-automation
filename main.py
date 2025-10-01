@@ -7,12 +7,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# TODO: see description
-"""
-- szabad e az unas adatb ben valtoztatni adatokat ha nem akkor mi legyen
-
-"""
-
 UNAS_API_BASE = os.getenv('API_BASE')
 UNAS_API_KEY = os.getenv("KEY")
 
