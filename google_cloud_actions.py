@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 from typing import Optional
 
@@ -9,31 +12,39 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.cloud import bigquery
 
-
+# =========================
+#          CONFIG
+# =========================
 EXCEL_PATH = r"data/today.xlsx"
 SHEET_NAME = 0
 
-# ---- Google Sheets (Drive) ----
-# Optional: upload into a specific Drive folder.
-# If you have a folder, set its ID (the long string from its URL). Otherwise leave None.
+# Google Drive / Sheets
 PARENT_FOLDER_ID: Optional[str] = None
-
-# If True, set permission "Anyone with the link can view" on the created sheet
 MAKE_LINK_VIEWABLE = True
 
-# ---- BigQuery ----
+# BigQuery
 PROJECT_ID  = "webshop-riport-2025"
 DATASET     = "Riportok"
-TABLE       = "test"
 BQ_LOCATION = "EU"
-WRITE_MODE  = "WRITE_APPEND"
 
-# ---- OAuth files ----
+CREATE_EXTERNAL_TABLE = True
+EXTERNAL_TABLE_NAME   = "test_sheet_ext"
+SHEET_RANGE: Optional[str] = None
+SKIP_ROWS = 1
+AUTO_DETECT_SCHEMA = True
+
+LOAD_TO_NATIVE_TABLE = True
+TABLE_NATIVE         = "test"
+WRITE_MODE_NATIVE    = "WRITE_APPEND"
+
+# OAuth files
 CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE       = "token.json"
 
-# ---- OAuth scopes ----
-SCOPES = ["https://www.googleapis.com/auth/drive"]  # full Drive access (adjust if needed)
+SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/bigquery"
+]
 
 
 def get_oauth_credentials() -> Credentials:
@@ -42,18 +53,14 @@ def get_oauth_credentials() -> Credentials:
     with CREDENTIALS_FILE. Saves refreshed/obtained token back to TOKEN_FILE.
     """
     creds = None
-
-    # Load user token if previously saved
     if os.path.exists(TOKEN_FILE):
+        # token.json must have BOTH scopes; if not, delete it and re-run
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
-    # Refresh or run browser flow
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            # Try refreshing with the saved refresh token
             creds.refresh(Request())
         else:
-            # Start local server flow to get new credentials
             if not os.path.exists(CREDENTIALS_FILE):
                 raise FileNotFoundError(
                     f"Missing {CREDENTIALS_FILE}. "
@@ -64,7 +71,12 @@ def get_oauth_credentials() -> Credentials:
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
 
-        # Save token for next runs
+        # Optional: attach quota project to quiet the SDK warning
+        try:
+            creds = creds.with_quota_project(PROJECT_ID)
+        except Exception:
+            pass
+
         with open(TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
 
@@ -76,11 +88,8 @@ def upload_excel_as_google_sheet(
     excel_path: str,
     parent_folder_id: Optional[str] = None,
     make_link_viewable: bool = False,
-) -> str:
-    """
-    Uploads an .xlsx to Drive and converts it to a Google Sheet.
-    Returns the Google Sheet URL.
-    """
+) -> tuple[str, str]:
+    """Upload .xlsx to Drive, convert to Google Sheet, return (sheet_id, link)."""
     base_name = os.path.splitext(os.path.basename(excel_path))[0]
 
     file_metadata = {
@@ -96,11 +105,10 @@ def upload_excel_as_google_sheet(
         resumable=True,
     )
 
-    created = (
-        drive_service.files()
-        .create(body=file_metadata, media_body=media, fields="id")
-        .execute()
-    )
+    created = drive_service.files().create(
+        body=file_metadata, media_body=media, fields="id"
+    ).execute()
+
     sheet_id = created["id"]
     sheet_link = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
 
@@ -110,47 +118,91 @@ def upload_excel_as_google_sheet(
             body={"role": "reader", "type": "anyone"},
         ).execute()
 
-    return sheet_link
+    return sheet_id, sheet_link
 
 
-def load_excel_to_bigquery(
+def create_external_table_pointing_to_sheet(
+    project_id: str,
+    dataset: str,
+    table: str,
+    sheet_id: str,
+    credentials: Credentials,
+    location: str = "EU",
+    sheet_range: Optional[str] = None,
+    skip_rows: int = 1,
+    autodetect: bool = True,
+):
+    """
+    CREATE OR REPLACE a BigQuery EXTERNAL TABLE that points to the Google Sheet.
+    Uses the same OAuth user creds (which now include Drive + BigQuery scopes).
+    """
+    client = bigquery.Client(project=project_id, location=location, credentials=credentials)
+    table_id = f"{project_id}.{dataset}.{table}"
+
+    # Handle old/new library versions for source format & options
+    try:
+        source_fmt = bigquery.SourceFormat.GOOGLE_SHEETS
+    except AttributeError:
+        source_fmt = "GOOGLE_SHEETS"
+
+    external_config = bigquery.ExternalConfig(source_fmt)
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+    external_config.source_uris = [sheet_url]
+    external_config.autodetect = autodetect
+
+    try:
+        gs_opts = bigquery.GoogleSheetsOptions()
+        if sheet_range:
+            gs_opts.range = sheet_range
+        if skip_rows:
+            gs_opts.skip_leading_rows = skip_rows
+        external_config.options = gs_opts
+    except AttributeError:
+        pass
+
+    table_obj = bigquery.Table(table_id)
+    table_obj.external_data_configuration = external_config
+
+    client.delete_table(table_id, not_found_ok=True)
+    created = client.create_table(table_obj)
+    return created, sheet_url
+
+
+def load_excel_to_bigquery_native(
     excel_path: str,
     sheet_name,
     project_id: str,
     dataset: str,
     table: str,
+    credentials: Credentials,
     location: str = "EU",
     write_mode: str = "WRITE_APPEND",
 ):
-    """
-    Reads Excel into a pandas DataFrame and loads it to BigQuery.
-    """
-    # Read Excel with pyarrow dtypes for better type mapping
+    """Load Excel into a native BigQuery table."""
     df = pd.read_excel(excel_path, sheet_name=sheet_name, dtype_backend="pyarrow")
-
-    # Tidy headers (avoid trailing spaces etc.)
     df.columns = [str(c).strip() for c in df.columns]
 
-    client = bigquery.Client(project=project_id, location=location)
+    client = bigquery.Client(project=project_id, location=location, credentials=credentials)
     table_id = f"{project_id}.{dataset}.{table}"
 
     job_config = bigquery.LoadJobConfig(
         write_disposition=write_mode,
-        autodetect=True,  # Let BQ infer schema; switch off and set job_config.schema for strict typing
+        autodetect=True,
     )
-
     load_job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
     result = load_job.result()
     return result.output_rows
 
 
 def main():
-    # ---- OAuth for Drive ----
-    creds = get_oauth_credentials()
-    drive = build("drive", "v3", credentials=creds)
+    # 1) OAuth user creds with BOTH scopes (Drive + BigQuery)
+    user_creds = get_oauth_credentials()
 
-    # ---- Upload Excel -> Google Sheet (get link) ----
-    sheet_link = upload_excel_as_google_sheet(
+    # 2) Drive client
+    drive = build("drive", "v3", credentials=user_creds)
+
+    # 3) Upload Excel → Google Sheet
+    sheet_id, sheet_link = upload_excel_as_google_sheet(
         drive_service=drive,
         excel_path=EXCEL_PATH,
         parent_folder_id=PARENT_FOLDER_ID,
@@ -158,17 +210,35 @@ def main():
     )
     print("✅ Google Sheet created:", sheet_link)
 
-    # ---- Load the same Excel into BigQuery ----
-    rows = load_excel_to_bigquery(
-        excel_path=EXCEL_PATH,
-        sheet_name=SHEET_NAME,
-        project_id=PROJECT_ID,
-        dataset=DATASET,
-        table=TABLE,
-        location=BQ_LOCATION,
-        write_mode=WRITE_MODE,
-    )
-    print(f"✅ BigQuery upload complete. Rows uploaded: {rows}")
+    # 4) Create/replace EXTERNAL TABLE pointing to the Sheet (shows link in Details)
+    if CREATE_EXTERNAL_TABLE:
+        created_table, source_uri = create_external_table_pointing_to_sheet(
+            project_id=PROJECT_ID,
+            dataset=DATASET,
+            table=EXTERNAL_TABLE_NAME,
+            sheet_id=sheet_id,
+            credentials=user_creds,
+            location=BQ_LOCATION,
+            sheet_range=SHEET_RANGE,
+            skip_rows=SKIP_ROWS,
+            autodetect=AUTO_DETECT_SCHEMA,
+        )
+        print(f"✅ External table created: {created_table.full_table_id}")
+        print(f"   Source URI: {source_uri}")
+
+    # 5) Optionally load to native BQ table too
+    if LOAD_TO_NATIVE_TABLE:
+        rows_uploaded = load_excel_to_bigquery_native(
+            excel_path=EXCEL_PATH,
+            sheet_name=SHEET_NAME,
+            project_id=PROJECT_ID,
+            dataset=DATASET,
+            table=TABLE_NATIVE,
+            credentials=user_creds,
+            location=BQ_LOCATION,
+            write_mode=WRITE_MODE_NATIVE,
+        )
+        print(f"✅ BigQuery native table loaded: {rows_uploaded} rows")
 
 
 if __name__ == "__main__":
