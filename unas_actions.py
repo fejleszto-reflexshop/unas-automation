@@ -157,7 +157,7 @@ def xml_to_excel_one_sheet(xml_path: str, out_xlsx: str | None = None) -> str:
     xml_path = str(xml_path)
 
     if out_xlsx is None:
-        out_xlsx = f"{xml_path.split('.')[0]}.xlsx"
+        out_xlsx = f"{xml_path.replace('.xml', '')}.xlsx"
 
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -235,7 +235,7 @@ def get_all_orders(date_start: str, date_end: str) -> str:
 
     return ET.tostring(orders_, encoding="unicode")
 
-def weekly_ranges_back(months=1, fmt="%Y.%m.%d") -> list:
+def weekly_ranges_back(months=3, fmt="%Y.%m.%d") -> list:
     today = date.today()
     this_week_monday = today - timedelta(days=today.weekday())
     prev_monday = this_week_monday - timedelta(days=7)
@@ -264,8 +264,10 @@ def save_week_ranges() -> None:
 def get_week_ranges() -> dict:
     data = json.load(open("weekly_ranges.json", encoding="utf-8"))
     weeks = {}
+
     for line in data:
         weeks[line["weeks_ago"]] = f"{line['start']}-{line['end']}"
+
     return weeks
 
 # -----------------------------
@@ -280,17 +282,24 @@ def get_token() -> str:
         return f.read().strip()
 
 
-def main() -> None:
-    # Get UNAS token
+def get_unas_token() -> None:
+    """ Get and set unas token"""
+
     token = unas_login(UNAS_API_KEY)
     print(f"Token megszerezve. {token}")
     set_token(token)
 
-    # Fetch today's orders
-    today = datetime.now().strftime("%Y.%m.%d")
+def fetch_today_orders_and_export_excel(day_else: str | None=None) -> None:
+    """ Fetch today's orders """
+
+    day = datetime.now().strftime("%Y.%m.%d")
+
+    if day_else is not None:
+        day = day_else
+
     response: str = get_all_orders(
-        date_start=today,
-        date_end=today
+        date_start=day,
+        date_end=day
     )
 
     fname = "today.xml"
@@ -299,6 +308,52 @@ def main() -> None:
     src = f"data/{fname}"
     out = xml_to_excel_one_sheet(src)
     print(f"Export kész: {out}")
+
+
+def fetch_previous_months_orders_and_export_excel() -> None:
+    """ Fetch previous 3 months + 2 weeks orders """
+    save_week_ranges()
+
+    for week in get_week_ranges().values():
+        start_date = str(week).split('-')[0]
+        end_date = str(week).split('-')[1]
+        fname = f"week_{start_date}-{end_date}.xml"
+
+        write_response_xml_file(
+            get_all_orders(start_date, end_date),
+            fname
+        )
+
+        src = f"data/{fname}"
+        out = xml_to_excel_one_sheet(src)
+        print("Export ready: ", out, src)
+
+        return
+
+
+def fetch_between_given_dates_orders_and_export_excel(start_date: str, end_date: str) -> None:
+    """ Fetch between two dates """
+
+    fname = f"between_{start_date}-{end_date}.xml"
+
+    write_response_xml_file(
+        get_all_orders(start_date, end_date),
+        fname
+    )
+
+    src = f"data/{fname}"
+    out = xml_to_excel_one_sheet(src)
+    print(f"Export ready: ", out, src)
+
+def main() -> None:
+    get_unas_token()
+
+    fetch_today_orders_and_export_excel()
+    # fetch_previous_months_orders_and_export_excel()
+    # fetch_between_given_dates_orders_and_export_excel(
+    #     start_date="2025.08.25",
+    #     end_date="2025.08.28"
+    # )
 
 if __name__ == "__main__":
     main()
