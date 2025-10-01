@@ -3,6 +3,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, date
 import json
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # TODO: see description
 """
@@ -10,8 +13,8 @@ import os
 
 """
 
-UNAS_API_BASE = "https://api.unas.eu/shop"
-UNAS_API_KEY = "2cddad0a5b4d3e6898a8fd0f05e551cece9c00e8"
+UNAS_API_BASE = os.getenv('API_BASE')
+UNAS_API_KEY = os.getenv("KEY")
 
 SESSION_TIMEOUT = 20  # másodperc
 
@@ -45,8 +48,6 @@ def unas_login(api_key: str) -> str:
     resp = requests.post(url, data=body.encode("utf-8"), headers=headers, timeout=SESSION_TIMEOUT)
     resp.raise_for_status()
 
-    # Token kinyerése az XML válaszból
-    # Példák szerint a <Token> elemben érkezik vissza
     tree = ET.fromstring(resp.text)
     token_el = tree.find("Token")
     if token_el is None or not token_el.text:
@@ -67,6 +68,7 @@ def unas_call(method: str, params: dict) -> ET.Element:
     }
     resp = requests.post(url, data=body.encode("utf-8"), headers=headers, timeout=SESSION_TIMEOUT)
     resp.raise_for_status()
+
     return ET.fromstring(resp.text)
 
 
@@ -182,18 +184,18 @@ def main():
     # orders_from_today = get_all_orders(date_start=today, date_end=today)
     # write_response_xml_file(orders_from_today, "orders_from_today.xml")
 
-    for week in weekly_ranges_back(months=1, fmt="%Y.%m.%d"):
-        write_response_xml_file(
-            get_all_orders(
-                week['start'],
-                week['end']
-            ),
-            f"week_{week['start']}-{week['end']}.xml"
-        )
+    # for week in weekly_ranges_back(months=1, fmt="%Y.%m.%d"):
+    #     write_response_xml_file(
+    #         get_all_orders(
+    #             week['start'],
+    #             week['end']
+    #         ),
+    #         f"week_{week['start']}-{week['end']}.xml"
+    #     )
 
     print(f"Orders megszerezve.")
 
 
 if __name__ == "__main__":
     main()
-    check_order_status()
+    # check_order_status()
