@@ -1,6 +1,15 @@
 import os
-import sys
+import time
 
 def main() -> None:
-    """ run every .py files at 6:00 AM """
-    pass
+    # TODO: wait for a signal to run commands
+
+    while True:
+        time.sleep(60)
+
+        os.system("python unas_actions.py")
+        os.system("python google_cloud_actions.py")
+
+
+if __name__ == "__main__":
+    main()

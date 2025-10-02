@@ -2,12 +2,14 @@ import os
 from typing import Optional
 
 import pandas as pd
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.cloud import bigquery
+
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -30,8 +32,8 @@ DATASET     = os.getenv("GOOGLE_CLOUD_DATASET")
 BQ_LOCATION = os.getenv("GOOGLE_CLOUD_BQ_LOCATION")
 
 CREATE_EXTERNAL_TABLE = True
-EXTERNAL_TABLE_NAME_DAILY   = "Napi rendelések"
-EXTERNAL_TABLE_NAME_SUMMARY = "Napi összegzés"
+EXTERNAL_TABLE_NAME_DAILY   = "test-Mai rendelések"
+EXTERNAL_TABLE_NAME_SUMMARY = "test-Napi összegzés"
 SHEET_RANGE: Optional[str] = None
 SKIP_ROWS = 1
 AUTO_DETECT_SCHEMA = True
