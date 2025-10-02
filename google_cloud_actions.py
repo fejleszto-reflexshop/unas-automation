@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
 from typing import Optional
 
@@ -11,11 +8,16 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.cloud import bigquery
+from datetime import datetime
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # =========================
 #          CONFIG
 # =========================
-EXCEL_PATH = r"data/today.xlsx"
+EXCEL_PATH = fr"data/today_{datetime.now().strftime('%Y.%m.%d')}.xlsx"
+EXCEL_SUMMARY_PATH = fr"data/orders_main.xlsx"
 SHEET_NAME = 0
 
 # Google Drive / Sheets
@@ -23,28 +25,22 @@ PARENT_FOLDER_ID: Optional[str] = None
 MAKE_LINK_VIEWABLE = True
 
 # BigQuery
-PROJECT_ID  = "webshop-riport-2025"
-DATASET     = "Riportok"
-BQ_LOCATION = "EU"
+PROJECT_ID  = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
+DATASET     = os.getenv("GOOGLE_CLOUD_DATASET")
+BQ_LOCATION = os.getenv("GOOGLE_CLOUD_BQ_LOCATION")
 
 CREATE_EXTERNAL_TABLE = True
-EXTERNAL_TABLE_NAME   = "test_sheet_ext"
+EXTERNAL_TABLE_NAME_DAILY   = "Napi rendelések"
+EXTERNAL_TABLE_NAME_SUMMARY = "Napi összegzés"
 SHEET_RANGE: Optional[str] = None
 SKIP_ROWS = 1
 AUTO_DETECT_SCHEMA = True
-
-LOAD_TO_NATIVE_TABLE = True
-TABLE_NATIVE         = "test"
-WRITE_MODE_NATIVE    = "WRITE_APPEND"
 
 # OAuth files
 CREDENTIALS_FILE = "credentials.json"
 TOKEN_FILE       = "token.json"
 
-SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/bigquery"
-]
+SCOPES = [os.getenv("GOOGLE_DRIVE_SCOPE"), os.getenv("GOOGLE_BIG_QUERY")]
 
 
 def get_oauth_credentials() -> Credentials:
@@ -194,51 +190,79 @@ def load_excel_to_bigquery_native(
     return result.output_rows
 
 
-def main():
-    # 1) OAuth user creds with BOTH scopes (Drive + BigQuery)
-    user_creds = get_oauth_credentials()
-
-    # 2) Drive client
-    drive = build("drive", "v3", credentials=user_creds)
-
-    # 3) Upload Excel → Google Sheet
+def upload_today_excel(drive) -> tuple:
+    # Upload Excel → Google Sheet
     sheet_id, sheet_link = upload_excel_as_google_sheet(
         drive_service=drive,
         excel_path=EXCEL_PATH,
         parent_folder_id=PARENT_FOLDER_ID,
         make_link_viewable=MAKE_LINK_VIEWABLE,
     )
-    print("✅ Google Sheet created:", sheet_link)
 
-    # 4) Create/replace EXTERNAL TABLE pointing to the Sheet (shows link in Details)
+    print("✅ Google Sheet today created:", sheet_link)
+
+    return sheet_id, sheet_link
+
+
+def upload_daily_summary_excel(drive) -> tuple:
+    """ Upload daily summary excel to Google Drive """
+
+    sheet_id, sheet_link = upload_excel_as_google_sheet(
+        drive_service=drive,
+        excel_path=EXCEL_SUMMARY_PATH,
+        parent_folder_id=PARENT_FOLDER_ID,
+        make_link_viewable=MAKE_LINK_VIEWABLE
+    )
+
+    print("✅ Google Sheet daily summary created:", sheet_link)
+
+    return sheet_id, sheet_link
+
+def main():
+    # OAuth user creds with BOTH scopes (Drive + BigQuery)
+    user_creds = get_oauth_credentials()
+
+    # Drive client
+    drive = build("drive", "v3", credentials=user_creds)
+
+    # Upload today orders
+    sheet_id_today, sheet_link_today = upload_today_excel(drive)
+
+    # Upload daily summary orders
+    sheet_id_summary, sheet_link_summary = upload_daily_summary_excel(drive)
+
+    # Create/replace EXTERNAL TABLE pointing to the Sheet (shows link in Details)
     if CREATE_EXTERNAL_TABLE:
-        created_table, source_uri = create_external_table_pointing_to_sheet(
+        created_table_daily, source_uri_daily = create_external_table_pointing_to_sheet(
             project_id=PROJECT_ID,
             dataset=DATASET,
-            table=EXTERNAL_TABLE_NAME,
-            sheet_id=sheet_id,
+            table=EXTERNAL_TABLE_NAME_DAILY,
+            sheet_id=sheet_id_today,
             credentials=user_creds,
             location=BQ_LOCATION,
             sheet_range=SHEET_RANGE,
             skip_rows=SKIP_ROWS,
             autodetect=AUTO_DETECT_SCHEMA,
         )
-        print(f"✅ External table created: {created_table.full_table_id}")
-        print(f"   Source URI: {source_uri}")
 
-    # 5) Optionally load to native BQ table too
-    if LOAD_TO_NATIVE_TABLE:
-        rows_uploaded = load_excel_to_bigquery_native(
-            excel_path=EXCEL_PATH,
-            sheet_name=SHEET_NAME,
+        print(f"✅ External table daily created: {created_table_daily.full_table_id}")
+        print(f"   Source URI daily: {source_uri_daily}")
+
+        created_table_summary, source_uri_summary = create_external_table_pointing_to_sheet(
             project_id=PROJECT_ID,
             dataset=DATASET,
-            table=TABLE_NATIVE,
+            table=EXTERNAL_TABLE_NAME_SUMMARY,
+            sheet_id=sheet_id_summary,
             credentials=user_creds,
             location=BQ_LOCATION,
-            write_mode=WRITE_MODE_NATIVE,
+            sheet_range=SHEET_RANGE,
+            skip_rows=SKIP_ROWS,
+            autodetect=AUTO_DETECT_SCHEMA,
         )
-        print(f"✅ BigQuery native table loaded: {rows_uploaded} rows")
+
+        print(f"✅ External table summary created: {created_table_summary.full_table_id}")
+        print(f"   Source URI summary: {source_uri_summary}")
+
 
 
 if __name__ == "__main__":
