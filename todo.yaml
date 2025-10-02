@@ -1,0 +1,6 @@
+google drive:
+  always delete order_main and yesterday files, so just order_main.xlsx and today_{day}.xlsx
+
+unas_api:
+  look for limit max 500
+  optimize code for api response order limits
