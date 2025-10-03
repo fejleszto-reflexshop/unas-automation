@@ -578,14 +578,11 @@ def main() -> None:
     fetch_today_orders_and_export_excel()
 
     # --- Havi könyv építése az elmúlt 3 hónapra:
-    # build_monthly_workbook_for_previous_weeks(
-    #     months_back=3,
-    #     out_xlsx="data/orders_by_month.xlsx",
-    #     spacer_rows=10
-    # )
-
-    # --- call google_cloud_actions.py
-    # upload_excel_files_into_google_cloud()
+    build_monthly_workbook_for_previous_weeks(
+        months_back=3,
+        out_xlsx="data/orders_by_month.xlsx",
+        spacer_rows=10
+    )
 
     # --- napi összefoglaló top-insert megoldással:
     daily_summary_orders_to_excel()

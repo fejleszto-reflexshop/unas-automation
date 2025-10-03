@@ -40,19 +40,19 @@ PROJECT_ID  = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
 DATASET     = os.getenv("GOOGLE_CLOUD_DATASET")
 BQ_LOCATION = os.getenv("GOOGLE_CLOUD_BQ_LOCATION")
 
-CREATE_EXTERNAL_TABLE = True
-
 # TODO: change names with webshop prefix, upload excel's
 
 PREFIX_REFLEXSHOP_TABLE_NAME = "test-reflexshop-"
 PREFIX_POPFANATIC_TABLE_NAME = "test-popfanatic-"
 
-EXTERNAL_TABLE_NAME_DAILY   = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Mai rendelések"
-EXTERNAL_TABLE_NAME_SUMMARY = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Napi összegzés"
-EXTERNAL_TABLE_NAME_WORKBOOK = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Havi visszatekintés"
+EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_DAILY   = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Mai rendelések"
+EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_SUMMARY = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Napi összegzés"
+EXTERNAL_TABLE_NAME_REFLEXSHOP_WORKBOOK = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Havi visszatekintés"
 
-EXTERNAL_TABLE_POPFANATIC_NAME_DAILY = f"{PREFIX_POPFANATIC_TABLE_NAME}Mai rendelések"
-EXTERNAL_TABLE_POPFANATIC_SUMMATY = f"{PREFIX_POPFANATIC_TABLE_NAME}Napi összegzés"
+EXTERNAL_TABLE_NAME_POPFANATIC_NAME_DAILY = f"{PREFIX_POPFANATIC_TABLE_NAME}Mai rendelések"
+EXTERNAL_TABLE_NAME_POPFANATIC_SUMMATY = f"{PREFIX_POPFANATIC_TABLE_NAME}Napi összegzés"
+EXTERNAL_TABLE_NAME_POPFANATIC_WORKBOOK = f"{PREFIX_POPFANATIC_TABLE_NAME}Havi visszatekintés"
+
 SHEET_RANGE: Optional[str] = None
 SKIP_ROWS = 1
 AUTO_DETECT_SCHEMA = True
@@ -210,112 +210,104 @@ def load_excel_to_bigquery_native(
     result = load_job.result()
     return result.output_rows
 
-
-def upload_today_excel(drive) -> tuple:
-    # Upload Excel → Google Sheet
-    sheet_id, sheet_link = upload_excel_as_google_sheet(
-        drive_service=drive,
-        excel_path=EXCEL_PATH,
-        parent_folder_id=PARENT_FOLDER_ID,
-        make_link_viewable=MAKE_LINK_VIEWABLE,
-    )
-
-    print("✅ Google Sheet today created:", sheet_link)
-
-    return sheet_id, sheet_link
-
-
-def upload_daily_summary_excel(drive) -> tuple:
-    """ Upload daily summary excel to Google Drive """
+def upload_to_google_drive(drive, excel_path, info) -> tuple:
 
     sheet_id, sheet_link = upload_excel_as_google_sheet(
         drive_service=drive,
-        excel_path=EXCEL_SUMMARY_PATH,
+        excel_path=excel_path,
         parent_folder_id=PARENT_FOLDER_ID,
         make_link_viewable=MAKE_LINK_VIEWABLE
     )
 
-    print("✅ Google Sheet daily summary created:", sheet_link)
+    print(f"✅ Google Sheet {info} created:", sheet_link)
 
     return sheet_id, sheet_link
 
-def upload_monthly_workbook_for_previous_months(drive) -> tuple:
-    """ Upload monthly workbook for previous months """
-
-    sheet_id, sheet_link = upload_excel_as_google_sheet(
-        drive_service=drive,
-        excel_path=EXCEL_WORKBOOK_PATH,
-        parent_folder_id=PARENT_FOLDER_ID,
-        make_link_viewable=MAKE_LINK_VIEWABLE
+def create_external_table(sheet_id, table, user_creds, info) -> None:
+    created_table, source_uri = create_external_table_pointing_to_sheet(
+        project_id=PROJECT_ID,
+        dataset=DATASET,
+        table=table,
+        sheet_id=sheet_id,
+        credentials=user_creds,
+        location=BQ_LOCATION,
+        sheet_range=SHEET_RANGE,
+        skip_rows=SKIP_ROWS,
+        autodetect=AUTO_DETECT_SCHEMA,
     )
 
-    print("✅ Google Sheet workbook created:", sheet_link)
+    print(f"✅ External table {info} created: {created_table.full_table_id}")
+    print(f"   Source URI {info}: {source_uri}")
 
-    return sheet_id, sheet_link
 
-
-def reflexshop_upload(user_creds, drive) -> None:
+def reflexshop_upload(drive, user_creds) -> None:
     # Upload today orders
-    sheet_id_today, sheet_link_today = upload_today_excel(drive)
+    sheet_id_today, sheet_link_today = upload_to_google_drive(
+        drive=drive,
+        excel_path=EXCEL_REFLEXSHOP_PATH,
+        info="today"
+    )
+
+    create_external_table(
+        sheet_id=sheet_id_today,
+        table=EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_DAILY,
+        user_creds=user_creds,
+        info="today"
+    )
 
     # Upload daily summary orders
-    sheet_id_summary, sheet_link_summary = upload_daily_summary_excel(drive)
+    sheet_id_summary, sheet_link_summary = upload_to_google_drive(
+        drive=drive,
+        excel_path=EXCEL_REFLEXSHOP_SUMMARY_PATH,
+        info="summary"
+    )
+
+    create_external_table(
+        sheet_id=sheet_id_summary,
+        table=EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_SUMMARY,
+        user_creds=user_creds,
+        info="summary"
+    )
 
     # Upload workbook for previous months
-    sheet_id_workbook, sheet_link_workbook = upload_monthly_workbook_for_previous_months(drive)
+    sheet_id_workbook, sheet_link_workbook = upload_to_google_drive(
+        drive=drive,
+        excel_path=EXCEL_REFLEXSHOP_WORKBOOK_PATH,
+        info="workbook"
+    )
 
-    # Create/replace EXTERNAL TABLE pointing to the Sheet (shows link in Details)
-    if CREATE_EXTERNAL_TABLE:
-        created_table_daily, source_uri_daily = create_external_table_pointing_to_sheet(
-            project_id=PROJECT_ID,
-            dataset=DATASET,
-            table=EXTERNAL_TABLE_NAME_DAILY,
-            sheet_id=sheet_id_today,
-            credentials=user_creds,
-            location=BQ_LOCATION,
-            sheet_range=SHEET_RANGE,
-            skip_rows=SKIP_ROWS,
-            autodetect=AUTO_DETECT_SCHEMA,
-        )
-
-        print(f"✅ External table daily created: {created_table_daily.full_table_id}")
-        print(f"   Source URI daily: {source_uri_daily}")
-
-        created_table_summary, source_uri_summary = create_external_table_pointing_to_sheet(
-            project_id=PROJECT_ID,
-            dataset=DATASET,
-            table=EXTERNAL_TABLE_NAME_SUMMARY,
-            sheet_id=sheet_id_summary,
-            credentials=user_creds,
-            location=BQ_LOCATION,
-            sheet_range=SHEET_RANGE,
-            skip_rows=SKIP_ROWS,
-            autodetect=AUTO_DETECT_SCHEMA,
-        )
-
-        print(f"✅ External table summary created: {created_table_summary.full_table_id}")
-        print(f"   Source URI summary: {source_uri_summary}")
-
-        created_table_workbook, source_uri_workbook = create_external_table_pointing_to_sheet(
-            project_id=PROJECT_ID,
-            dataset=DATASET,
-            table=EXTERNAL_TABLE_NAME_WORKBOOK,
-            sheet_id=sheet_id_workbook,
-            credentials=user_creds,
-            location=BQ_LOCATION,
-            sheet_range=SHEET_RANGE,
-            skip_rows=SKIP_ROWS,
-            autodetect=AUTO_DETECT_SCHEMA,
-        )
-
-        print(f"✅ External table workbook created: {created_table_workbook.full_table_id}")
-        print(f"   Source URI workbook: {source_uri_workbook}")
+    create_external_table(
+        sheet_id=sheet_id_workbook,
+        table=EXTERNAL_TABLE_NAME_REFLEXSHOP_WORKBOOK,
+        user_creds=user_creds,
+        info="workbook"
+    )
 
 
-def popfanatic_upload(drive) -> None:
-    pass
+def popfanatic_upload(drive, user_creds) -> None:
+    sheet_id_today, sheet_link_today = upload_to_google_drive(
+        drive=drive,
+        excel_path=EXCEL_REFLEXSHOP_PATH,
+        info="today"
+    )
+    create_external_table(sheet_id=sheet_id_today, table=EXTERNAL_TABLE_NAME_POPFANATIC_NAME_DAILY, user_creds=user_creds)
+
+    sheet_id_summary, sheet_link_summary = upload_to_google_drive(
+        drive=drive,
+        excel_path=EXCEL_REFLEXSHOP_SUMMARY_PATH,
+        info="summary"
+    )
+    create_external_table(sheet_id=sheet_id_summary, table=EXTERNAL_TABLE_NAME_POPFANATIC_SUMMATY, user_creds=user_creds)
+
+    sheet_id_workbook, sheet_link_workbook = upload_to_google_drive(
+        drive=drive,
+        excel_path=EXCEL_REFLEXSHOP_WORKBOOK_PATH,
+        info="workbook"
+    )
+    create_external_table(sheet_id=sheet_id_workbook, table=EXTERNAL_TABLE_NAME_POPFANATIC_WORKBOOK, user_creds=user_creds)
 
 
+# TODO: delete yesterday today_{...} excel file before uploading the new today_{...} excel file
 def main():
     # OAuth user creds with BOTH scopes (Drive + BigQuery)
     user_creds = get_oauth_credentials()
@@ -323,7 +315,9 @@ def main():
     # Drive client
     drive = build("drive", "v3", credentials=user_creds)
 
-    reflexshop_upload(user_creds, drive)
+    reflexshop_upload(drive=drive, user_creds=user_creds)
+
+    # popfanatic_upload(drive=drive, user_creds=user_creds)
 
 
 if __name__ == "__main__":

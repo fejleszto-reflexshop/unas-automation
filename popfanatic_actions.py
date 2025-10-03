@@ -145,34 +145,28 @@ def get_all_orders_write_into_json(access_token, token_type) -> None:
 
 def get_today_orders_write_into_excel(access_token, token_type) -> None:
     today = datetime.now().strftime("%Y-%m-%d")
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     extra_params = {"createdAt": today}
 
     data = get_orders(access_token, token_type, page=0, limit=200, extra_params=extra_params)
 
-    out_path_json = fr"data/orders_popfantastic_{today}.json"
-    out_path_excel = fr"data/orders_popfantastic_full_{today}.xlsx"
+    ndjson_path = fr"data/orders_{SHOP_NAME}_{today}.ndjson"
+    xlsx_path = fr"data/orders_{SHOP_NAME}_{today}.xlsx"
 
     if len(data['items']) > 0:
-        for item in data['items']:
-            id_ = extract_order_id(item)
-            order = get_order_by_id(access_token, token_type, id_)
+        with open(ndjson_path, "w", encoding="utf-8") as f_out:
+            for item in data['items']:
+                id_ = extract_order_id(item)
+                order = get_order_by_id(access_token, token_type, id_)
+                f_out.write(json.dumps(order, ensure_ascii=False) + "\n")
 
-            with open(out_path_json, "a+", encoding="utf-8") as f_out:
-                json.dump(order, f_out, ensure_ascii=False)
-
-        df = pd.read_json(out_path_json)
-
-        df.to_excel(out_path_excel, index=False, engine="openpyxl")
+        df = pd.read_json(ndjson_path, lines=True)
+        df.to_excel(xlsx_path, index=False, engine="openpyxl")
     else:
-        with open(out_path_json, "w", encoding="utf-8") as f_out:
-            json.dump({"order": 0}, f_out, ensure_ascii=False)
-
-        df = pd.read_json(out_path_json)
-        df.to_excel(out_path_excel, index=True, engine="openpyxl")
+        pd.DataFrame([{"orders": 0, "createdAt": today}]).to_excel(xlsx_path, index=False, engine="openpyxl")
 
 
+# TODO: make summary and months excel files
 def main() -> None:
     access_token, token_type = get_access_token()
 
