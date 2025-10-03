@@ -18,9 +18,17 @@ load_dotenv()
 # =========================
 #          CONFIG
 # =========================
-EXCEL_PATH = fr"data/today_{datetime.now().strftime('%Y.%m.%d')}.xlsx"
-EXCEL_SUMMARY_PATH = fr"data/orders_main.xlsx"
-EXCEL_WORKBOOK_PATH = fr"data/orders_by_month.xlsx"
+
+# reflexshop
+EXCEL_REFLEXSHOP_PATH = fr"data/today_{datetime.now().strftime('%Y.%m.%d')}.xlsx"
+EXCEL_REFLEXSHOP_SUMMARY_PATH = fr"data/orders_main.xlsx"
+EXCEL_REFLEXSHOP_WORKBOOK_PATH = fr"data/orders_by_month.xlsx"
+
+# popfanatic
+EXCEL_POPFANATIC_TODAY_PATH = fr'data/orders_popfanatic_{datetime.now().strftime("%Y-%m-%d")}.xlsx'
+EXCEL_POPFANATIC_SUMMARY_PATH = fr'data/orders_popfanatic_main.xlsx'
+EXCEL_POPFANATIC_WORKBOOK_PATH = fr'data/orders_popfanatic_by_month.xlsx'
+
 SHEET_NAME = 0
 
 # Google Drive / Sheets
@@ -33,9 +41,18 @@ DATASET     = os.getenv("GOOGLE_CLOUD_DATASET")
 BQ_LOCATION = os.getenv("GOOGLE_CLOUD_BQ_LOCATION")
 
 CREATE_EXTERNAL_TABLE = True
-EXTERNAL_TABLE_NAME_DAILY   = "test-Mai rendelések"
-EXTERNAL_TABLE_NAME_SUMMARY = "test-Napi összegzés"
-EXTERNAL_TABLE_NAME_WORKBOOK = "test-Havi visszatekintés"
+
+# TODO: change names with webshop prefix, upload excel's
+
+PREFIX_REFLEXSHOP_TABLE_NAME = "test-reflexshop-"
+PREFIX_POPFANATIC_TABLE_NAME = "test-popfanatic-"
+
+EXTERNAL_TABLE_NAME_DAILY   = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Mai rendelések"
+EXTERNAL_TABLE_NAME_SUMMARY = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Napi összegzés"
+EXTERNAL_TABLE_NAME_WORKBOOK = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Havi visszatekintés"
+
+EXTERNAL_TABLE_POPFANATIC_NAME_DAILY = f"{PREFIX_POPFANATIC_TABLE_NAME}Mai rendelések"
+EXTERNAL_TABLE_POPFANATIC_SUMMATY = f"{PREFIX_POPFANATIC_TABLE_NAME}Napi összegzés"
 SHEET_RANGE: Optional[str] = None
 SKIP_ROWS = 1
 AUTO_DETECT_SCHEMA = True
@@ -237,13 +254,7 @@ def upload_monthly_workbook_for_previous_months(drive) -> tuple:
     return sheet_id, sheet_link
 
 
-def main():
-    # OAuth user creds with BOTH scopes (Drive + BigQuery)
-    user_creds = get_oauth_credentials()
-
-    # Drive client
-    drive = build("drive", "v3", credentials=user_creds)
-
+def reflexshop_upload(user_creds, drive) -> None:
     # Upload today orders
     sheet_id_today, sheet_link_today = upload_today_excel(drive)
 
@@ -300,6 +311,19 @@ def main():
         print(f"✅ External table workbook created: {created_table_workbook.full_table_id}")
         print(f"   Source URI workbook: {source_uri_workbook}")
 
+
+def popfanatic_upload(drive) -> None:
+    pass
+
+
+def main():
+    # OAuth user creds with BOTH scopes (Drive + BigQuery)
+    user_creds = get_oauth_credentials()
+
+    # Drive client
+    drive = build("drive", "v3", credentials=user_creds)
+
+    reflexshop_upload(user_creds, drive)
 
 
 if __name__ == "__main__":
