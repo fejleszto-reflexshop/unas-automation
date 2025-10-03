@@ -20,6 +20,7 @@ load_dotenv()
 # =========================
 EXCEL_PATH = fr"data/today_{datetime.now().strftime('%Y.%m.%d')}.xlsx"
 EXCEL_SUMMARY_PATH = fr"data/orders_main.xlsx"
+EXCEL_WORKBOOK_PATH = fr"data/orders_by_month.xlsx"
 SHEET_NAME = 0
 
 # Google Drive / Sheets
@@ -34,6 +35,7 @@ BQ_LOCATION = os.getenv("GOOGLE_CLOUD_BQ_LOCATION")
 CREATE_EXTERNAL_TABLE = True
 EXTERNAL_TABLE_NAME_DAILY   = "test-Mai rendelések"
 EXTERNAL_TABLE_NAME_SUMMARY = "test-Napi összegzés"
+EXTERNAL_TABLE_NAME_WORKBOOK = "test-Havi visszatekintés"
 SHEET_RANGE: Optional[str] = None
 SKIP_ROWS = 1
 AUTO_DETECT_SCHEMA = True
@@ -220,6 +222,21 @@ def upload_daily_summary_excel(drive) -> tuple:
 
     return sheet_id, sheet_link
 
+def upload_monthly_workbook_for_previous_months(drive) -> tuple:
+    """ Upload monthly workbook for previous months """
+
+    sheet_id, sheet_link = upload_excel_as_google_sheet(
+        drive_service=drive,
+        excel_path=EXCEL_WORKBOOK_PATH,
+        parent_folder_id=PARENT_FOLDER_ID,
+        make_link_viewable=MAKE_LINK_VIEWABLE
+    )
+
+    print("✅ Google Sheet workbook created:", sheet_link)
+
+    return sheet_id, sheet_link
+
+
 def main():
     # OAuth user creds with BOTH scopes (Drive + BigQuery)
     user_creds = get_oauth_credentials()
@@ -232,6 +249,9 @@ def main():
 
     # Upload daily summary orders
     sheet_id_summary, sheet_link_summary = upload_daily_summary_excel(drive)
+
+    # Upload workbook for previous months
+    sheet_id_workbook, sheet_link_workbook = upload_monthly_workbook_for_previous_months(drive)
 
     # Create/replace EXTERNAL TABLE pointing to the Sheet (shows link in Details)
     if CREATE_EXTERNAL_TABLE:
@@ -264,6 +284,21 @@ def main():
 
         print(f"✅ External table summary created: {created_table_summary.full_table_id}")
         print(f"   Source URI summary: {source_uri_summary}")
+
+        created_table_workbook, source_uri_workbook = create_external_table_pointing_to_sheet(
+            project_id=PROJECT_ID,
+            dataset=DATASET,
+            table=EXTERNAL_TABLE_NAME_WORKBOOK,
+            sheet_id=sheet_id_workbook,
+            credentials=user_creds,
+            location=BQ_LOCATION,
+            sheet_range=SHEET_RANGE,
+            skip_rows=SKIP_ROWS,
+            autodetect=AUTO_DETECT_SCHEMA,
+        )
+
+        print(f"✅ External table workbook created: {created_table_workbook.full_table_id}")
+        print(f"   Source URI workbook: {source_uri_workbook}")
 
 
 
