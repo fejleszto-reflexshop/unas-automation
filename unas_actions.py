@@ -581,7 +581,7 @@ def fetch_previous_months_orders_and_export_excel() -> None:
 
 
 # -----------------------------
-# Daily job (18:00): optional example
+# Daily job (18:00)
 # -----------------------------
 def daily_summary_orders_to_excel(output_path: str = "data/orders_main.xlsx", sheet_name: str = "OrderItems_ALL",
                                   spacer_rows: int = 3) -> None:
@@ -589,17 +589,22 @@ def daily_summary_orders_to_excel(output_path: str = "data/orders_main.xlsx", sh
     yday_str = (date.today() - timedelta(days=1)).strftime("%Y.%m.%d")
     xml_today = get_all_orders(date_start=today_str, date_end=today_str)
     xml_yday = get_all_orders(date_start=yday_str, date_end=yday_str)
+
     write_response_xml_file(xml_today, "today.xml")
     write_response_xml_file(xml_yday, "yesterday.xml")
+
     df_today = xml_string_to_dataframe(xml_today)
     df_yday = xml_string_to_dataframe(xml_yday)
     header_cols = list(df_today.columns) if len(df_today.columns) >= len(df_yday.columns) else list(df_yday.columns)
     _open_or_init_wb_with_header(output_path, sheet_name, header_cols)[0].save(output_path)
     deleted = delete_batch_by_label(output_path, sheet_name, yday_str, header_cols)
+
     if deleted:
         print(f"• Removed previous partial day for {yday_str}")
+
     prepend_batch_to_excel(df_yday, output_path, batch_label=yday_str, sheet_name=sheet_name, spacer_rows=spacer_rows)
     prepend_batch_to_excel(df_today, output_path, batch_label=today_str, sheet_name=sheet_name, spacer_rows=spacer_rows)
+
     print(f"✔ Rotated batches. Top = TODAY({today_str}), below = YESTERDAY(full {yday_str}). File: {output_path}")
 
 def upload_excel_files_into_google_cloud() -> None:
