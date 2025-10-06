@@ -1,12 +1,6 @@
-import os
-import json
 import time
-import requests
-from dotenv import load_dotenv
-from datetime import datetime, timedelta, date
-import pandas as pd
-from openpyxl import Workbook, load_workbook
-from openpyxl.utils.dataframe import dataframe_to_rows
+from src.unas_helper import _get_existing_header
+from unas_helper import *
 
 load_dotenv()
 
@@ -323,10 +317,6 @@ def _open_or_init_wb_with_header(xlsx_path: str, sheet_name: str, header_cols: l
 
     return wb, ws
 
-def _get_existing_header(ws) -> list[str]:
-    # Read header from first row
-    return [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-
 def _existing_week_labels_in_sheet(ws) -> set[str]:
     """
     Scan column A for lines like 'Week: YYYY.MM.DD-YYYY.MM.DD' and return the labels.
@@ -444,20 +434,6 @@ def week_months_covered(start_dt: date, end_dt: date) -> list[date]:
         cur += timedelta(days=1)
 
     return sorted(months)
-
-def weekly_ranges_between(start_dt: date, end_dt: date) -> list[tuple[date, date]]:
-    first_monday = start_dt - timedelta(days=start_dt.weekday())
-    ranges = []
-    cur_start = first_monday
-
-    while cur_start <= end_dt:
-        cur_end = cur_start + timedelta(days=6)
-        s = max(cur_start, start_dt)
-        e = min(cur_end, end_dt)
-        ranges.append((s, e))
-        cur_start += timedelta(days=7)
-
-    return ranges
 
 def build_monthly_workbook_for_previous_weeks(access_token,
                                               token_type,
