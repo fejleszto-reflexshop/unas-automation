@@ -21,8 +21,8 @@ SESSION_TIMEOUT = 20  # sec
 
 
 def data_dir_with_filename(fname: str) -> str:
-    os.makedirs("data", exist_ok=True)
-    return f"data/{fname}"
+    os.makedirs("../data", exist_ok=True)
+    return f"../data/{fname}"
 
 
 # -----------------------------
@@ -101,6 +101,7 @@ def unas_login(api_key: str) -> str:
     resp = requests.post(url, data=body.encode("utf-8"), headers=headers, timeout=SESSION_TIMEOUT)
     resp.raise_for_status()
     tree = ET.fromstring(resp.text)
+    tree = ET.fromstring(resp.text)
     token_el = tree.find("Token")
 
     if token_el is None or not token_el.text:
@@ -110,12 +111,12 @@ def unas_login(api_key: str) -> str:
 
 
 def set_token(token: str) -> None:
-    with open("token.txt", "w", encoding="utf-8") as f:
+    with open("../token.txt", "w", encoding="utf-8") as f:
         f.write(token)
 
 
 def get_token() -> str:
-    with open("token.txt", "r", encoding="utf-8") as f:
+    with open("../token.txt", "r", encoding="utf-8") as f:
         return f.read().strip()
 
 
@@ -399,12 +400,12 @@ def weekly_ranges_back(months=1, fmt="%Y.%m.%d") -> list:
 
 
 def save_week_ranges() -> None:
-    os.makedirs("data", exist_ok=True)
-    json.dump(weekly_ranges_back(), open("weekly_ranges.json", "w", encoding="utf-8"))
+    os.makedirs("../data", exist_ok=True)
+    json.dump(weekly_ranges_back(), open("../weekly_ranges.json", "w", encoding="utf-8"))
 
 
 def get_week_ranges() -> dict:
-    data = json.load(open("weekly_ranges.json", encoding="utf-8"))
+    data = json.load(open("../weekly_ranges.json", encoding="utf-8"))
     weeks = {}
 
     for line in data:
@@ -506,7 +507,7 @@ def _get_existing_header(ws) -> list[str]:
 
 def build_monthly_workbook_for_previous_weeks(
         months_back: int = 3,
-        out_xlsx: str = "data/orders_by_month.xlsx",
+        out_xlsx: str = "data/orders_unas_by_month.xlsx",
         spacer_rows: int = 3
 ) -> str:
     """
@@ -598,8 +599,8 @@ def fetch_today_orders_and_export_excel(day_else: Optional[str] = None) -> str:
     fname_xml = f"today.xml"
     write_response_xml_file(response, fname_xml)
 
-    src_xml = f"data/{fname_xml}"
-    out_xlsx = f"data/today_{day}.xlsx"
+    src_xml = f"../data/{fname_xml}"
+    out_xlsx = f"../data/today_unas_{day}.xlsx"
     export_xml_file_to_excel_one_sheet(src_xml, out_xlsx)
     print(f"Export kész: {out_xlsx}")
 
@@ -615,8 +616,8 @@ def fetch_previous_months_orders_and_export_excel() -> None:
         fname_xml = f"week_{start_date}-{end_date}.xml"
         write_response_xml_file(get_all_orders(start_date, end_date), fname_xml)
 
-        src_xml = f"data/{fname_xml}"
-        out_xlsx = f"data/week_{start_date}-{end_date}.xlsx"
+        src_xml = f"../data/{fname_xml}"
+        out_xlsx = f"../data/week_{start_date}-{end_date}.xlsx"
         export_xml_file_to_excel_one_sheet(src_xml, out_xlsx)
 
         print("Export ready:", out_xlsx, src_xml)
@@ -625,7 +626,7 @@ def fetch_previous_months_orders_and_export_excel() -> None:
 # -----------------------------
 # Daily job (18:00)
 # -----------------------------
-def daily_summary_orders_to_excel(output_path: str = "data/orders_main.xlsx", sheet_name: str = "OrderItems_ALL",
+def daily_summary_orders_to_excel(output_path: str = "../data/orders_unas_main.xlsx", sheet_name: str = "OrderItems_ALL",
                                   spacer_rows: int = 3) -> None:
     today_str = datetime.now().strftime("%Y.%m.%d")
     yday_str = (date.today() - timedelta(days=1)).strftime("%Y.%m.%d")
@@ -668,7 +669,7 @@ def main() -> None:
     # --- Havi könyv építése, csak hiányzó hetek hozzáfűzésével:
     build_monthly_workbook_for_previous_weeks(
         months_back=3,
-        out_xlsx="data/orders_by_month.xlsx",
+        out_xlsx="../data/orders_unas_by_month.xlsx",
         spacer_rows=10
     )
 

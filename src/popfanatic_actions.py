@@ -17,7 +17,7 @@ CLIENT_SECRET = (os.getenv("POPFANATIC_CLIENT_SECRET") or "").strip()
 TOKEN_URL = (os.getenv("POPFANATIC_TOKEN_URL") or f"").strip()
 API_BASE  = (os.getenv("POPFANATIC_API_URL")  or "").strip()
 
-DATA_DIR = "data"
+DATA_DIR = "../data"
 DEFAULT_MAIN_XLSX = os.path.join(DATA_DIR, "orders_popfanatic_main.xlsx")
 DEFAULT_SHEET = "Orders_ALL"
 
@@ -528,8 +528,8 @@ def get_today_orders_write_into_excel(access_token, token_type) -> None:
     extra_params = {"createdAt": today}
 
     data = get_orders(access_token, token_type, page=0, limit=200, extra_params=extra_params)
-    ndjson_path = os.path.join(DATA_DIR, f"orders_popfanatic_{today}.ndjson")
-    xlsx_path = os.path.join(DATA_DIR, f"orders_popfanatic_{today}.xlsx")
+    ndjson_path = os.path.join(DATA_DIR, f"today_popfanatic_{today}.ndjson")
+    xlsx_path = os.path.join(DATA_DIR, f"today_popfanatic_{today}.xlsx")
 
     items = data.get("items") or []
     if len(items) > 0:
@@ -571,7 +571,11 @@ def main() -> None:
         spacer_rows=3
     )
 
-    get_today_orders_write_into_excel(access_token=access_token, token_type=token_type)
+    # Get today orders
+    get_today_orders_write_into_excel(
+        access_token=access_token,
+        token_type=token_type
+    )
 
 if __name__ == "__main__":
     main()

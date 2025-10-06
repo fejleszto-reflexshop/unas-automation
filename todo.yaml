@@ -4,7 +4,6 @@ google drive:
 
   task:
     [
-      always delete order_main and yesterday files, so just order_main.xlsx and today_{day}.xlsx
       merge big queries into one and make multiple sheets into one excel file
     ]
 
@@ -27,5 +26,5 @@ server:
 other:
   task:
     [
-
+      clean data from excel files
     ]
