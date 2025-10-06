@@ -97,8 +97,10 @@ def extract_order_id(item: dict) -> str:
         h = str(href).rstrip("/")
         h = h.split("?", 1)[0].split("#", 1)[0]
         parts = h.split("/")
+
         if parts:
             return parts[-1]
+
     return str(item.get("id"))
 
 # -----------------------------
@@ -134,6 +136,7 @@ def fetch_order_details_for_items(access_token, token_type, items: list[dict]) -
         oid = extract_order_id(stub)
         detail = get_order_by_id(access_token, token_type, oid)
         out.append(detail)
+
     return out
 
 # -----------------------------
@@ -160,19 +163,17 @@ def _flatten_json(obj, parent_key=""):
     return rows
 
 def details_to_dataframe(details: list[dict]) -> pd.DataFrame:
-    """
-    Convert list of detailed order dicts to a DataFrame by flattening each.
-    """
     flat_rows = [_flatten_json(d) for d in details]
     if not flat_rows:
         return pd.DataFrame()
+
     return pd.DataFrame(flat_rows)
 
 # -----------------------------
 # Unique order counter (use innerId if available)
 # -----------------------------
 PRIORITY_ID_FIELDS = [
-    "innerId",  # <- your canonical unique order id
+    "innerId",  # canonical unique order id
     "id", "order.id", "orderId", "order_id", "number", "incrementId", "code", "Order_Id", "Order_Key"
 ]
 EXCLUDE_ID_KEYWORDS = ("customer", "buyer", "user", "address", "billing", "shipping",
@@ -185,12 +186,12 @@ def estimate_unique_order_count(df: pd.DataFrame) -> int:
     cols = list(df.columns)
     lowered = {c.lower(): c for c in cols}
 
-    # 1) Always prefer innerId if present
+    # 1) Prefer innerId
     if "innerid" in lowered:
         c = lowered["innerid"]
         return int(pd.Series(df[c]).astype(str).nunique(dropna=True))
 
-    # 2) Other known names (just in case)
+    # 2) Other known names
     for pname in PRIORITY_ID_FIELDS:
         if pname.lower() in lowered:
             c = lowered[pname.lower()]
@@ -199,8 +200,7 @@ def estimate_unique_order_count(df: pd.DataFrame) -> int:
             except Exception:
                 pass
 
-    # 3) Otherwise, pick the *id-suffixed* column with the highest nunique,
-    #    while ignoring obviously non-order entities.
+    # 3) Heuristic id columns
     candidates = []
     for c in cols:
         lc = c.lower()
@@ -214,14 +214,14 @@ def estimate_unique_order_count(df: pd.DataFrame) -> int:
                 continue
 
     if candidates:
-        candidates.sort(reverse=True)  # highest nunique first
+        candidates.sort(reverse=True)
         return int(candidates[0][0])
 
-    # 4) Fallback: number of rows
+    # 4) Fallback
     return int(len(df))
 
 # -----------------------------
-# Excel helpers (header/init + batch locate/delete + prepend)
+# Excel helpers
 # -----------------------------
 def _open_or_init_wb_with_header(xlsx_path: str, sheet_name: str, header_cols: list[str]):
     if os.path.exists(xlsx_path):
@@ -239,13 +239,28 @@ def _open_or_init_wb_with_header(xlsx_path: str, sheet_name: str, header_cols: l
         ws = wb.active
         ws.title = sheet_name
         ws.append(header_cols)
+
     return wb, ws
 
+def _get_existing_header(ws) -> list[str]:
+    # Read header from first row
+    return [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+
+def _existing_week_labels_in_sheet(ws) -> set[str]:
+    """
+    Scan column A for lines like 'Week: YYYY.MM.DD-YYYY.MM.DD' and return the labels.
+    """
+    labels = set()
+    for r in range(1, ws.max_row + 1):
+        val = ws.cell(row=r, column=1).value
+        if isinstance(val, str) and val.startswith("Week: "):
+            label = val.replace("Week: ", "").strip()
+            if label:
+                labels.add(label)
+
+    return labels
+
 def _find_batch_bounds(ws, label: str):
-    """
-    Find the block that begins with the "Day: {label}" marker in column A.
-    Returns (start_row, end_row) or None.
-    """
     target = f"Day: {label}"
     start = None
 
@@ -264,20 +279,23 @@ def _find_batch_bounds(ws, label: str):
         if isinstance(val, str) and val.startswith("Day: "):
             next_batch = r
             break
-
     end = (next_batch - 1) if next_batch else ws.max_row
+
     return start, end
 
 def delete_batch_by_label(xlsx_path: str, sheet_name: str, label: str, header_cols: list[str]) -> bool:
     wb, ws = _open_or_init_wb_with_header(xlsx_path, sheet_name, header_cols)
     bounds = _find_batch_bounds(ws, label)
+
     if not bounds:
         wb.save(xlsx_path)
         return False
+
     start, end = bounds
     amount = end - start + 1
     ws.delete_rows(start, amount)
     wb.save(xlsx_path)
+
     return True
 
 def prepend_batch_to_excel(df: pd.DataFrame, xlsx_path: str, batch_label: str,
@@ -303,7 +321,7 @@ def prepend_batch_to_excel(df: pd.DataFrame, xlsx_path: str, batch_label: str,
     wb.save(xlsx_path)
 
 # -----------------------------
-# MONTHLY WORKBOOK (previous N months, weekly blocks per month sheet)
+# MONTHLY WORKBOOK (append-only, skip existing weeks)
 # -----------------------------
 def month_sheet_name(d: date) -> str:
     return f"{d.year:04d}-{d.month:02d}"
@@ -313,7 +331,7 @@ def append_week_block(ws, df: pd.DataFrame, label: str, spacer_rows: int = 3):
     Append a weekly block at the bottom of the sheet:
       - 1 row: "Week: YYYY.MM.DD-YYYY.MM.DD"
       - data rows (NO header)
-      - 1 row: "Orders in week:" <unique order count>
+      - 1 row: "Orders in week:" <unique innerId count>
       - spacer_rows empty rows
     """
     insert_at = (ws.max_row or 1) + 1
@@ -326,9 +344,8 @@ def append_week_block(ws, df: pd.DataFrame, label: str, spacer_rows: int = 3):
         for c_idx, val in enumerate(row_vals, start=1):
             ws.cell(row=insert_at + 1 + i, column=c_idx, value=val)
 
-    # Summary (uses innerId if present)
+    # Summary
     orders_count = estimate_unique_order_count(df)
-
     summary_row = insert_at + 1 + len(df)
     ws.cell(row=summary_row, column=1, value="Orders in week:")
     ws.cell(row=summary_row, column=2, value=orders_count)
@@ -338,29 +355,27 @@ def append_week_block(ws, df: pd.DataFrame, label: str, spacer_rows: int = 3):
         ws.cell(row=summary_row + idx + 1, column=2, value="")
 
 def week_months_covered(start_dt: date, end_dt: date) -> list[date]:
-    """
-    Return the first day of each month touched by the given week.
-    """
     months = set()
     cur = start_dt
+
     while cur <= end_dt:
         months.add(date(cur.year, cur.month, 1))
         cur += timedelta(days=1)
+
     return sorted(months)
 
 def weekly_ranges_between(start_dt: date, end_dt: date) -> list[tuple[date, date]]:
-    """
-    Monday–Sunday slicing for the given window (clamped to the window boundaries).
-    """
     first_monday = start_dt - timedelta(days=start_dt.weekday())
     ranges = []
     cur_start = first_monday
+
     while cur_start <= end_dt:
         cur_end = cur_start + timedelta(days=6)
         s = max(cur_start, start_dt)
         e = min(cur_end, end_dt)
         ranges.append((s, e))
         cur_start += timedelta(days=7)
+
     return ranges
 
 def build_monthly_workbook_for_previous_weeks(access_token,
@@ -369,69 +384,89 @@ def build_monthly_workbook_for_previous_weeks(access_token,
                                               out_xlsx: str = os.path.join(DATA_DIR, "orders_popfanatic_by_month.xlsx"),
                                               spacer_rows: int = 3) -> str:
     """
-    For the last `months_back` months:
-      - create a sheet per month (YYYY-MM),
-      - append weekly blocks (Mon–Sun) to each relevant month sheet,
-      - if a week spans two months, write the block to both sheets.
-    The table is at the **order (detail) level** — 1 row per order detail object (flattened).
+    RUN WEEKLY (e.g., every Monday):
+    - Append only the **missing** weeks to month sheets.
+    - Never delete or rewrite existing weeks.
+    - If a week touches two months, write to both sheets (but only if missing there).
     """
     ensure_data_dir()
 
     # Determine window [window_start .. today]
     today = date.today()
     cur_month_first = date(today.year, today.month, 1)
-    start_month_year = cur_month_first.year
+    start_year = cur_month_first.year
     start_month = cur_month_first.month - months_back
+
     while start_month <= 0:
         start_month += 12
-        start_month_year -= 1
-    window_start = date(start_month_year, start_month, 1)
-    window_end = today  # up to today
+        start_year -= 1
 
-    # Build weekly ranges
+    window_start = date(start_year, start_month, 1)
+    window_end = today
+
+    # All week ranges in window
     weeks = weekly_ranges_between(window_start, window_end)
 
-    # PASS 1: fetch & flatten all weeks, compute master header union
-    weekly_payloads: list[tuple[tuple[date, date], pd.DataFrame]] = []
-    header_union: set[str] = set()
+    # We will open the workbook lazily per sheet to read existing labels and header
+    existing_wb = load_workbook(out_xlsx) if os.path.exists(out_xlsx) else None
+    existing_labels_by_sheet: dict[str, set[str]] = {}
+    existing_headers_by_sheet: dict[str, list[str]] = {}
 
+    if existing_wb:
+        for sheet in existing_wb.sheetnames:
+            ws = existing_wb[sheet]
+            existing_labels_by_sheet[sheet] = _existing_week_labels_in_sheet(ws)
+            existing_headers_by_sheet[sheet] = _get_existing_header(ws)
+
+    def sheet_has_label(sheet_name: str, label: str) -> bool:
+        return label in existing_labels_by_sheet.get(sheet_name, set())
+
+    # Iterate weeks; only fetch those that are missing from at least one affected month sheet
     for (ws_start, ws_end) in weeks:
+        label = f"{ws_start.strftime('%Y.%m.%d')}-{ws_end.strftime('%Y.%m.%d')}"
+        months_hit = [month_sheet_name(m) for m in week_months_covered(ws_start, ws_end)]
+
+        # Skip if week already exists on ALL relevant sheets
+        if months_hit and all(sheet_has_label(sheet, label) for sheet in months_hit):
+            continue
+
+        # Fetch details for this week (only now, since it's missing somewhere)
         start_iso = datetime(ws_start.year, ws_start.month, ws_start.day, 0, 0, 0).strftime("%Y-%m-%dT%H:%M:%S")
         end_iso   = datetime(ws_end.year, ws_end.month, ws_end.day, 23, 59, 59).strftime("%Y-%m-%dT%H:%M:%S")
-
         stubs = fetch_orders_between(access_token, token_type, start_iso, end_iso)
+
         if not stubs:
-            weekly_payloads.append(((ws_start, ws_end), pd.DataFrame()))
+            # Even if missing, nothing to write
             continue
 
         details = fetch_order_details_for_items(access_token, token_type, stubs)
         df_week = details_to_dataframe(details)
 
-        header_union |= set(df_week.columns)
-        weekly_payloads.append(((ws_start, ws_end), df_week))
+        # Write this week to every month sheet where it's missing
+        for sheet in months_hit:
+            # Header for this sheet: preserve existing header if any, else derive from df
+            header_cols = existing_headers_by_sheet.get(sheet)
+            if not header_cols or all(h is None for h in header_cols):
+                header_cols = sorted(df_week.columns) if not df_week.empty else ["info"]
 
-    header_cols = sorted(header_union) if header_union else ["info"]
+            # Align df to header (drop unknown cols; add missing empty cols)
+            df_aligned = df_week.reindex(columns=header_cols)
 
-    # PASS 2: write to workbook by month
-    for ((ws_start, ws_end), df_week) in weekly_payloads:
-        if df_week.empty:
-            continue
-
-        # align to header union
-        df_week = df_week.reindex(columns=header_cols)
-
-        start_s_label = ws_start.strftime("%Y.%m.%d")
-        end_s_label   = ws_end.strftime("%Y.%m.%d")
-        label = f"{start_s_label}-{end_s_label}"
-
-        months_hit = week_months_covered(ws_start, ws_end)
-        for month_first_day in months_hit:
-            sheet = month_sheet_name(month_first_day)
             wb, ws = _open_or_init_wb_with_header(out_xlsx, sheet, header_cols)
-            append_week_block(ws, df_week, label=label, spacer_rows=spacer_rows)
-            wb.save(out_xlsx)
 
-    print(f"Monthly workbook ready: {out_xlsx}")
+            # Refresh caches if we just created a new sheet in a new file
+            if sheet not in existing_labels_by_sheet:
+                existing_labels_by_sheet[sheet] = _existing_week_labels_in_sheet(ws)
+                existing_headers_by_sheet[sheet] = _get_existing_header(ws)
+
+            # Only append if missing on this particular sheet
+            if label not in existing_labels_by_sheet[sheet]:
+                append_week_block(ws, df_aligned, label=label, spacer_rows=spacer_rows)
+                wb.save(out_xlsx)
+                # Update cache so repeated weeks in same run won’t duplicate
+                existing_labels_by_sheet[sheet].add(label)
+
+    print(f"Monthly workbook ready (append-only): {out_xlsx}")
     return out_xlsx
 
 # -----------------------------
@@ -442,27 +477,23 @@ def daily_summary_orders_into_excel(access_token, token_type,
                                    sheet_name: str = DEFAULT_SHEET,
                                    spacer_rows: int = 3) -> None:
     """
-    Builds/refreshes a rolling daily summary Excel:
-    - removes any previous partial Yesterday batch,
-    - prepends Yesterday (full) and then Today (current),
-    - each with a 'Day: YYYY-MM-DD' label, the data, a summary line (unique innerId),
-      and spacer rows.
+    Rolling daily summary:
+    - remove any previous partial Yesterday,
+    - prepend Yesterday (final) then Today (current),
+    - summary counts by unique innerId.
     """
     ensure_data_dir()
 
-    # Today window
     now = datetime.now()
     today_date_str = now.strftime("%Y-%m-%d")
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
     today_end   = now.strftime("%Y-%m-%dT%H:%M:%S")
 
-    # Yesterday window
     y = now - timedelta(days=1)
     yday_date_str = y.strftime("%Y-%m-%d")
     yday_start = y.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
     yday_end   = y.replace(hour=23, minute=59, second=59, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
 
-    # Fetch stubs → details → DataFrame
     today_stubs = fetch_orders_between(access_token, token_type, today_start, today_end)
     yday_stubs  = fetch_orders_between(access_token, token_type, yday_start, yday_end)
 
@@ -472,20 +503,16 @@ def daily_summary_orders_into_excel(access_token, token_type,
     df_today = details_to_dataframe(today_details)
     df_yday  = details_to_dataframe(yday_details)
 
-    # Header union so the sheet stays stable
     header_cols = sorted(set(df_today.columns).union(df_yday.columns)) or ["info"]
     df_today = df_today.reindex(columns=header_cols)
     df_yday  = df_yday.reindex(columns=header_cols)
 
-    # Ensure workbook exists with header
     _open_or_init_wb_with_header(output_path, sheet_name, header_cols)[0].save(output_path)
 
-    # Remove old yesterday block (avoid duplicates if re-run)
     deleted = delete_batch_by_label(output_path, sheet_name, yday_date_str, header_cols)
     if deleted:
         print(f"• Removed previous partial day for {yday_date_str}")
 
-    # Prepend YESTERDAY (finalized), then TODAY (current)
     prepend_batch_to_excel(df_yday,  output_path, batch_label=yday_date_str,  sheet_name=sheet_name, spacer_rows=spacer_rows)
     prepend_batch_to_excel(df_today, output_path, batch_label=today_date_str, sheet_name=sheet_name, spacer_rows=spacer_rows)
 
@@ -496,12 +523,13 @@ def daily_summary_orders_into_excel(access_token, token_type,
 # -----------------------------
 def get_today_orders_write_into_excel(access_token, token_type) -> None:
     ensure_data_dir()
+
     today = datetime.now().strftime("%Y-%m-%d")
     extra_params = {"createdAt": today}
 
     data = get_orders(access_token, token_type, page=0, limit=200, extra_params=extra_params)
-    ndjson_path = os.path.join(DATA_DIR, f"orders_{SHOP_NAME}_{today}.ndjson")
-    xlsx_path = os.path.join(DATA_DIR, f"orders_{SHOP_NAME}_{today}.xlsx")
+    ndjson_path = os.path.join(DATA_DIR, f"orders_popfanatic_{today}.ndjson")
+    xlsx_path = os.path.join(DATA_DIR, f"orders_popfanatic_{today}.xlsx")
 
     items = data.get("items") or []
     if len(items) > 0:
@@ -516,29 +544,34 @@ def get_today_orders_write_into_excel(access_token, token_type) -> None:
     else:
         pd.DataFrame([{"orders": 0, "createdAt": today}]).to_excel(xlsx_path, index=False, engine="openpyxl")
 
+    print("Today orders written to excel")
+
+
 # -----------------------------
 # Main
 # -----------------------------
 def main() -> None:
     access_token, token_type = get_access_token()
 
-    # Monthly workbook for previous 3 months (weekly blocks, month sheets)
+    # Run weekly (e.g., every Monday): append-only, skip existing weeks
     build_monthly_workbook_for_previous_weeks(
         access_token=access_token,
         token_type=token_type,
         months_back=3,
         out_xlsx=os.path.join(DATA_DIR, "orders_popfanatic_by_month.xlsx"),
-        spacer_rows=5
+        spacer_rows=10
     )
 
     # Daily rolling summary with top-insert (TODAY then YESTERDAY)
-    # daily_summary_orders_into_excel(
-    #     access_token,
-    #     token_type,
-    #     output_path=DEFAULT_MAIN_XLSX,
-    #     sheet_name=DEFAULT_SHEET,
-    #     spacer_rows=3
-    # )
+    daily_summary_orders_into_excel(
+        access_token=access_token,
+        token_type=token_type,
+        output_path=DEFAULT_MAIN_XLSX,
+        sheet_name=DEFAULT_SHEET,
+        spacer_rows=3
+    )
+
+    get_today_orders_write_into_excel(access_token=access_token, token_type=token_type)
 
 if __name__ == "__main__":
     main()

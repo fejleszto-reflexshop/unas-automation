@@ -72,7 +72,6 @@ ORDER_COLUMNS: Dict[str, str] = {
 # -----------------------------
 def _xml(params_dict: dict) -> str:
     root = ET.Element("Params")
-
     for k, v in params_dict.items():
         e = ET.SubElement(root, k)
         e.text = str(v)
@@ -122,7 +121,7 @@ def get_token() -> str:
 
 def get_unas_token() -> None:
     token = unas_login(UNAS_API_KEY)
-    print(f"Token OK: {token[:8]}...")  # shortened
+    print(f"Token OK: {token[:8]}...")
     set_token(token)
 
 
@@ -133,7 +132,6 @@ def unas_call(method: str, params: dict) -> ET.Element:
         "Content-Type": "application/xml",
         "Authorization": f"Bearer {get_token()}",
     }
-
     resp = requests.post(url, data=body.encode("utf-8"), headers=headers, timeout=SESSION_TIMEOUT)
     resp.raise_for_status()
 
@@ -190,7 +188,6 @@ def _flatten_element(elem: ET.Element, base_path: str = "") -> dict:
     children = list(elem)
     if not children:
         out[base_path.strip("/")] = (elem.text or "").strip()
-
         return out
 
     by_tag = {}
@@ -220,11 +217,9 @@ def _should_skip_item_by_name(item_elem: ET.Element) -> bool:
 # -----------------------------
 def combine_orders_xml_strings(*xml_strings: str) -> str:
     combined = ET.Element("Orders")
-
     for x in xml_strings:
         if not x or not x.strip():
             continue
-
         root = ET.fromstring(x)
         for order in root.findall(".//Order"):
             combined.append(deepcopy(order))
@@ -246,7 +241,6 @@ def xml_string_to_dataframe(xml_text: str) -> pd.DataFrame:
 
     for o in root.findall(".//Order"):
         group_name = txt(o, "Customer/Group/Name")
-
         if group_name not in ALLOWED_CUSTOMER_GROUPS:
             continue
 
@@ -270,7 +264,6 @@ def xml_file_to_dataframe(xml_path: str) -> pd.DataFrame:
 # -----------------------------
 def write_dataframe_to_new_excel(df: pd.DataFrame, out_xlsx: str, sheet_name: str = "OrderItems_ALL") -> str:
     os.makedirs(os.path.dirname(out_xlsx) or ".", exist_ok=True)
-
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xlw:
         df.to_excel(xlw, sheet_name=sheet_name, index=False)
 
@@ -281,7 +274,6 @@ def export_xml_file_to_excel_one_sheet(xml_path: str, out_xlsx: Optional[str] = 
                                        sheet_name: str = "OrderItems_ALL") -> str:
     if out_xlsx is None:
         out_xlsx = f"{os.path.splitext(xml_path)[0]}.xlsx"
-
     df = xml_file_to_dataframe(xml_path)
 
     return write_dataframe_to_new_excel(df, out_xlsx, sheet_name=sheet_name)
@@ -298,7 +290,6 @@ def xml_to_excel_one_sheet(xml_path: str, out_xlsx: Optional[str] = None) -> str
 def _open_or_init_wb_with_header(xlsx_path: str, sheet_name: str, header_cols: list):
     if os.path.exists(xlsx_path):
         wb = load_workbook(xlsx_path)
-
         if sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
             if ws.max_row < 1:
@@ -319,13 +310,11 @@ def _open_or_init_wb_with_header(xlsx_path: str, sheet_name: str, header_cols: l
 def _find_batch_bounds(ws, label: str) -> Optional[tuple]:
     target = f"Day: {label}"
     start = None
-
     for r in range(1, ws.max_row + 1):
         val = ws.cell(row=r, column=1).value
         if isinstance(val, str) and val == target:
             start = r
             break
-
     if start is None:
         return None
 
@@ -344,7 +333,6 @@ def _find_batch_bounds(ws, label: str) -> Optional[tuple]:
 def delete_batch_by_label(xlsx_path: str, sheet_name: str, label: str, header_cols: list) -> bool:
     wb, ws = _open_or_init_wb_with_header(xlsx_path, sheet_name, header_cols)
     bounds = _find_batch_bounds(ws, label)
-
     if not bounds:
         wb.save(xlsx_path)
         return False
@@ -403,7 +391,6 @@ def weekly_ranges_back(months=1, fmt="%Y.%m.%d") -> list:
             "start": prev_monday.strftime(fmt),
             "end": prev_sunday.strftime(fmt),
         })
-
         prev_monday -= timedelta(days=7)
         prev_sunday -= timedelta(days=7)
         weeks_ago += 1
@@ -413,7 +400,6 @@ def weekly_ranges_back(months=1, fmt="%Y.%m.%d") -> list:
 
 def save_week_ranges() -> None:
     os.makedirs("data", exist_ok=True)
-
     json.dump(weekly_ranges_back(), open("weekly_ranges.json", "w", encoding="utf-8"))
 
 
@@ -428,7 +414,7 @@ def get_week_ranges() -> dict:
 
 
 # -----------------------------
-# NEW: Month-based workbook builders
+# NEW: Month-based workbook builders (append-only, skip existing weeks)
 # -----------------------------
 def month_sheet_name(d: date) -> str:
     return f"{d.year:04d}-{d.month:02d}"
@@ -437,10 +423,10 @@ def month_sheet_name(d: date) -> str:
 def append_week_block(ws, df: pd.DataFrame, label: str, spacer_rows: int = 3):
     """
     Hozzáfűz egy heti blokkot a lap ALJÁRA:
-    - 1 sor: "Batch: YYYY.MM.DD-YYYY.MM.DD"
+    - 1 sor: "Week: YYYY.MM.DD-YYYY.MM.DD"
     - df tartalma (fejléc NÉLKÜL)
     - 1 sor: "Orders in week:" <egyedi Order_Id>
-    - spacer_rows db ÜRES sor (valóban üresen)
+    - spacer_rows db ÜRES sor
     """
     insert_at = (ws.max_row or 1) + 1
 
@@ -458,7 +444,7 @@ def append_week_block(ws, df: pd.DataFrame, label: str, spacer_rows: int = 3):
     ws.cell(row=summary_row, column=1, value="Orders in week:")
     ws.cell(row=summary_row, column=2, value=orders_count)
 
-    # ÜRES sorok beszúrása biztosan
+    # ÜRES sorok
     for idx in range(max(0, spacer_rows)):
         ws.cell(row=summary_row + idx + 1, column=2, value="")
 
@@ -500,16 +486,35 @@ def weekly_ranges_between(start_dt: date, end_dt: date) -> list[tuple[date, date
     return ranges
 
 
+def _existing_week_labels_in_sheet(ws) -> set[str]:
+    """
+    Visszaadja az adott lapon már meglévő 'Week: YYYY.MM.DD-YYYY.MM.DD' címkéket (A oszlop).
+    """
+    labels = set()
+    for r in range(1, ws.max_row + 1):
+        val = ws.cell(row=r, column=1).value
+        if isinstance(val, str) and val.startswith("Week: "):
+            lab = val.replace("Week: ", "").strip()
+            if lab:
+                labels.add(lab)
+    return labels
+
+
+def _get_existing_header(ws) -> list[str]:
+    return [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+
+
 def build_monthly_workbook_for_previous_weeks(
         months_back: int = 3,
         out_xlsx: str = "data/orders_by_month.xlsx",
         spacer_rows: int = 3
 ) -> str:
     """
-    Az elmúlt 'months_back' hónapra:
+    APPEND-ONLY, IDEMPOTENT:
       - hónaponként külön sheet (YYYY-MM),
-      - a hónapban szereplő hetek blokkja egymás alatt, 3 üres sorral elválasztva,
-      - ha a hét két hónapot érint, a blokk mindkét hónap lapjára bemásolva.
+      - CSAK a hiányzó hetek kerülnek letöltésre és hozzáfűzésre,
+      - meglévő heti blokkok NEM törlődnek / íródnak felül,
+      - ha a hét két hónapot érint, mindkét lapon megjelenik (csak ha még nincs ott).
     A táblázat rendelés-szintű (xml_string_to_dataframe) — 1 sor / rendelés.
     """
     today = date.today()
@@ -517,38 +522,70 @@ def build_monthly_workbook_for_previous_weeks(
 
     start_month_year = cur_month_first.year
     start_month = cur_month_first.month - months_back
-
     while start_month <= 0:
         start_month += 12
         start_month_year -= 1
 
     window_start = date(start_month_year, start_month, 1)
-    window_end = today  # ha lezárt hónapig kellene, állítsd a hónap utolsó napjára
+    window_end = today
 
     weeks = weekly_ranges_between(window_start, window_end)
-    header_cols = list(ORDER_COLUMNS.keys())
 
+    # Ha létezik fájl, előre beolvassuk a már létező heti címkéket és fejlécet
+    existing_wb = load_workbook(out_xlsx) if os.path.exists(out_xlsx) else None
+    existing_labels_by_sheet: dict[str, set[str]] = {}
+    existing_headers_by_sheet: dict[str, list[str]] = {}
+
+    if existing_wb:
+        for sheet in existing_wb.sheetnames:
+            ws = existing_wb[sheet]
+            existing_labels_by_sheet[sheet] = _existing_week_labels_in_sheet(ws)
+            existing_headers_by_sheet[sheet] = _get_existing_header(ws)
+
+    def sheet_has_label(sheet_name: str, label: str) -> bool:
+        return label in existing_labels_by_sheet.get(sheet_name, set())
+
+    # Menet közben mindig csak a hiányzó heteket kérjük le
     for (ws_start, ws_end) in weeks:
         start_s = ws_start.strftime("%Y.%m.%d")
         end_s = ws_end.strftime("%Y.%m.%d")
+        label = f"{start_s}-{end_s}"
 
+        months_hit = [month_sheet_name(m) for m in week_months_covered(ws_start, ws_end)]
+
+        # Ha minden érintett lapon megvan már, ugorjuk
+        if months_hit and all(sheet_has_label(sheet, label) for sheet in months_hit):
+            continue
+
+        # Most kérjük le csak ezt a hiányzó hetet
         xml_week = get_all_orders(date_start=start_s, date_end=end_s)
-        df_week = xml_string_to_dataframe(xml_week)  # 1 sor / rendelés
-
+        df_week = xml_string_to_dataframe(xml_week)
         if df_week.empty:
             continue
 
-        label = f"{start_s}-{end_s}"
-        months_hit = week_months_covered(ws_start, ws_end)
+        # Írjuk ki minden olyan lapra, ahol még hiányzik
+        for sheet in months_hit:
+            # Fejléc: ha lap létezik, megőrizzük a meglévőt, különben ORDER_COLUMNS kulcsokkal indítunk
+            header_cols = existing_headers_by_sheet.get(sheet)
+            if not header_cols or all(h is None for h in header_cols):
+                header_cols = list(ORDER_COLUMNS.keys())
 
-        for month_first_day in months_hit:
-            sheet = month_sheet_name(month_first_day)
+            # Igazítsuk a df-et a fejléc oszlopaihoz
+            df_aligned = df_week.reindex(columns=header_cols, fill_value="")
+
             wb, ws = _open_or_init_wb_with_header(out_xlsx, sheet, header_cols)
-            append_week_block(ws, df_week, label=label, spacer_rows=spacer_rows)
-            wb.save(out_xlsx)
 
-    print(f"Monthly workbook ready: {out_xlsx}")
+            # Frissítsük a cache-t, ha új lap jött létre
+            if sheet not in existing_labels_by_sheet:
+                existing_labels_by_sheet[sheet] = _existing_week_labels_in_sheet(ws)
+                existing_headers_by_sheet[sheet] = _get_existing_header(ws)
 
+            if label not in existing_labels_by_sheet[sheet]:
+                append_week_block(ws, df_aligned, label=label, spacer_rows=spacer_rows)
+                wb.save(out_xlsx)
+                existing_labels_by_sheet[sheet].add(label)
+
+    print(f"Monthly workbook ready (append-only): {out_xlsx}")
     return out_xlsx
 
 
@@ -560,23 +597,28 @@ def fetch_today_orders_and_export_excel(day_else: Optional[str] = None) -> str:
     response = get_all_orders(date_start=day, date_end=day)
     fname_xml = f"today.xml"
     write_response_xml_file(response, fname_xml)
+
     src_xml = f"data/{fname_xml}"
     out_xlsx = f"data/today_{day}.xlsx"
     export_xml_file_to_excel_one_sheet(src_xml, out_xlsx)
     print(f"Export kész: {out_xlsx}")
+
     return out_xlsx
 
 
 def fetch_previous_months_orders_and_export_excel() -> None:
     """(Opcionális régi funkció) Heti fájlok külön xlsx-be."""
     save_week_ranges()
+
     for week in get_week_ranges().values():
         start_date, end_date = week.split('-')
         fname_xml = f"week_{start_date}-{end_date}.xml"
         write_response_xml_file(get_all_orders(start_date, end_date), fname_xml)
+
         src_xml = f"data/{fname_xml}"
         out_xlsx = f"data/week_{start_date}-{end_date}.xlsx"
         export_xml_file_to_excel_one_sheet(src_xml, out_xlsx)
+
         print("Export ready:", out_xlsx, src_xml)
 
 
@@ -607,10 +649,12 @@ def daily_summary_orders_to_excel(output_path: str = "data/orders_main.xlsx", sh
 
     print(f"✔ Rotated batches. Top = TODAY({today_str}), below = YESTERDAY(full {yday_str}). File: {output_path}")
 
+
 def upload_excel_files_into_google_cloud() -> None:
     subprocess.run(["python", "google_cloud_actions.py"], capture_output=True, text=True)
-
     print("Google Cloud Actions Upload Complete")
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -621,7 +665,7 @@ def main() -> None:
     # --- napi külön export:
     fetch_today_orders_and_export_excel()
 
-    # --- Havi könyv építése az elmúlt 3 hónapra:
+    # --- Havi könyv építése, csak hiányzó hetek hozzáfűzésével:
     build_monthly_workbook_for_previous_weeks(
         months_back=3,
         out_xlsx="data/orders_by_month.xlsx",
@@ -630,6 +674,7 @@ def main() -> None:
 
     # --- napi összefoglaló top-insert megoldással:
     daily_summary_orders_to_excel()
+
 
 if __name__ == "__main__":
     main()

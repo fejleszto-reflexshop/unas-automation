@@ -40,7 +40,6 @@ PROJECT_ID  = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
 DATASET     = os.getenv("GOOGLE_CLOUD_DATASET")
 BQ_LOCATION = os.getenv("GOOGLE_CLOUD_BQ_LOCATION")
 
-# TODO: change names with webshop prefix, upload excel's
 
 PREFIX_REFLEXSHOP_TABLE_NAME = "test-reflexshop-"
 PREFIX_POPFANATIC_TABLE_NAME = "test-popfanatic-"
@@ -287,24 +286,39 @@ def reflexshop_upload(drive, user_creds) -> None:
 def popfanatic_upload(drive, user_creds) -> None:
     sheet_id_today, sheet_link_today = upload_to_google_drive(
         drive=drive,
-        excel_path=EXCEL_REFLEXSHOP_PATH,
+        excel_path=EXCEL_POPFANATIC_TODAY_PATH,
         info="today"
     )
-    create_external_table(sheet_id=sheet_id_today, table=EXTERNAL_TABLE_NAME_POPFANATIC_NAME_DAILY, user_creds=user_creds)
+    create_external_table(
+        sheet_id=sheet_id_today,
+        table=EXTERNAL_TABLE_NAME_POPFANATIC_NAME_DAILY,
+        user_creds=user_creds,
+        info="today"
+    )
 
     sheet_id_summary, sheet_link_summary = upload_to_google_drive(
         drive=drive,
-        excel_path=EXCEL_REFLEXSHOP_SUMMARY_PATH,
+        excel_path=EXCEL_POPFANATIC_SUMMARY_PATH,
         info="summary"
     )
-    create_external_table(sheet_id=sheet_id_summary, table=EXTERNAL_TABLE_NAME_POPFANATIC_SUMMATY, user_creds=user_creds)
+    create_external_table(
+        sheet_id=sheet_id_summary,
+        table=EXTERNAL_TABLE_NAME_POPFANATIC_SUMMATY,
+        user_creds=user_creds,
+        info="summary"
+    )
 
     sheet_id_workbook, sheet_link_workbook = upload_to_google_drive(
         drive=drive,
-        excel_path=EXCEL_REFLEXSHOP_WORKBOOK_PATH,
+        excel_path=EXCEL_POPFANATIC_WORKBOOK_PATH,
         info="workbook"
     )
-    create_external_table(sheet_id=sheet_id_workbook, table=EXTERNAL_TABLE_NAME_POPFANATIC_WORKBOOK, user_creds=user_creds)
+    create_external_table(
+        sheet_id=sheet_id_workbook,
+        table=EXTERNAL_TABLE_NAME_POPFANATIC_WORKBOOK,
+        user_creds=user_creds,
+        info="workbook"
+    )
 
 
 # TODO: delete yesterday today_{...} excel file before uploading the new today_{...} excel file
