@@ -97,12 +97,27 @@ def extract_order_id(item: dict) -> str:
         h = str(href).rstrip("/")
         h = h.split("?", 1)[0].split("#", 1)[0]
         parts = h.split("/")
-
         if parts:
             return parts[-1]
-
     return str(item.get("id"))
 
+
+def get_customer_group_name(access_token, token_type, group_name_id: str) -> str:
+    url = f"{API_BASE}/customerGroups/{group_name_id}"
+
+    headers = {
+        "Authorization": f"{token_type} {access_token}",
+        "Accept": "application/json",
+    }
+
+    for attempt in range(4):
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+
+        if r.status_code == 200:
+            return r.json()['name']
+
+    return "Unknown"
 # -----------------------------
 # Range fetchers
 # -----------------------------
@@ -136,7 +151,6 @@ def fetch_order_details_for_items(access_token, token_type, items: list[dict]) -
         oid = extract_order_id(stub)
         detail = get_order_by_id(access_token, token_type, oid)
         out.append(detail)
-
     return out
 
 # -----------------------------
@@ -145,14 +159,25 @@ def fetch_order_details_for_items(access_token, token_type, items: list[dict]) -
 def _flatten_json(obj, parent_key=""):
     """
     Flatten nested dict/list JSON into a single dict with dotted keys.
-    Lists are indexed: 'lines[1].sku', etc.
+    Special handling:
+      - If parent_key == 'customerGroup' and value has 'href',
+        use that href directly.
     """
     rows = {}
 
     if isinstance(obj, dict):
+        # ✅ Special case for customerGroup
+        if parent_key == "customerGroup" and "href" in obj:
+            group_name = get_customer_group_name(access_token, token_type, obj["href"].split("/")[-1])
+            rows[parent_key] = group_name
+
+            return rows
+
+        # Otherwise, flatten recursively
         for k, v in obj.items():
             nk = f"{parent_key}.{k}" if parent_key else k
             rows.update(_flatten_json(v, nk))
+
     elif isinstance(obj, list):
         for i, v in enumerate(obj, start=1):
             nk = f"{parent_key}[{i}]"
@@ -162,12 +187,68 @@ def _flatten_json(obj, parent_key=""):
 
     return rows
 
+
+
 def details_to_dataframe(details: list[dict]) -> pd.DataFrame:
     flat_rows = [_flatten_json(d) for d in details]
+
     if not flat_rows:
         return pd.DataFrame()
 
     return pd.DataFrame(flat_rows)
+
+# -----------------------------
+# Keys to keep in Excel
+# -----------------------------
+KEYS_FROM_JSON_RESPONSE = [
+    "innerId",
+    "invoiceId",
+    "invoicePrefix",
+    "firstname",
+    "lastname",
+    "phone",
+    "fax",
+    "email",
+    "shippingFirstname",
+    "shippingLastname",
+    "shippingCompany",
+    "shippingAddress1",
+    "shippingAddress2",
+    "shippingCity",
+    "shippingPostcode",
+    "shippingZoneName",
+    "shippingCountryName",
+    "shippingAddressFormat",
+    "shippingMethodName",
+    "shippingMethodLocalizedName",
+    "shippingMethodTaxRate",
+    "shippingMethodTaxName",
+    "shippingMethodExtension",
+    "shippingReceivingPointId",
+    "paymentFirstname",
+    "paymentLastname",
+    "paymentCompany",
+    "paymentAddress1",
+    "paymentAddress2",
+    "paymentCity",
+    "paymentPostcode",
+    "paymentZoneName",
+    "paymentCountryName",
+    "paymentAddressFormat",
+    "paymentMethodName",
+    "paymentMethodCode",
+    "comment",
+    "total",
+    "dateCreated",
+    "customerGroup",
+]
+
+def keep_only_keys(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=keys)
+
+    cols = [k for k in keys if k in df.columns]
+    return df.reindex(columns=cols)
 
 # -----------------------------
 # Unique order counter (use innerId if available)
@@ -442,14 +523,13 @@ def build_monthly_workbook_for_previous_weeks(access_token,
         details = fetch_order_details_for_items(access_token, token_type, stubs)
         df_week = details_to_dataframe(details)
 
+        # Keep only requested keys
+        df_week = keep_only_keys(df_week, KEYS_FROM_JSON_RESPONSE)
+
         # Write this week to every month sheet where it's missing
         for sheet in months_hit:
-            # Header for this sheet: preserve existing header if any, else derive from df
-            header_cols = existing_headers_by_sheet.get(sheet)
-            if not header_cols or all(h is None for h in header_cols):
-                header_cols = sorted(df_week.columns) if not df_week.empty else ["info"]
-
-            # Align df to header (drop unknown cols; add missing empty cols)
+            # Fixed header order for consistency
+            header_cols = KEYS_FROM_JSON_RESPONSE
             df_aligned = df_week.reindex(columns=header_cols)
 
             wb, ws = _open_or_init_wb_with_header(out_xlsx, sheet, header_cols)
@@ -503,16 +583,20 @@ def daily_summary_orders_into_excel(access_token, token_type,
     df_today = details_to_dataframe(today_details)
     df_yday  = details_to_dataframe(yday_details)
 
-    header_cols = sorted(set(df_today.columns).union(df_yday.columns)) or ["info"]
-    df_today = df_today.reindex(columns=header_cols)
-    df_yday  = df_yday.reindex(columns=header_cols)
+    # Keep only requested keys + fixed header order
+    header_cols = KEYS_FROM_JSON_RESPONSE
+    df_today = keep_only_keys(df_today, header_cols).reindex(columns=header_cols)
+    df_yday  = keep_only_keys(df_yday,  header_cols).reindex(columns=header_cols)
 
+    # Ensure workbook/sheet exists with our header
     _open_or_init_wb_with_header(output_path, sheet_name, header_cols)[0].save(output_path)
 
+    # Remove any previous partial "yesterday" batch
     deleted = delete_batch_by_label(output_path, sheet_name, yday_date_str, header_cols)
     if deleted:
         print(f"• Removed previous partial day for {yday_date_str}")
 
+    # Prepend YESTERDAY then TODAY
     prepend_batch_to_excel(df_yday,  output_path, batch_label=yday_date_str,  sheet_name=sheet_name, spacer_rows=spacer_rows)
     prepend_batch_to_excel(df_today, output_path, batch_label=today_date_str, sheet_name=sheet_name, spacer_rows=spacer_rows)
 
@@ -540,9 +624,14 @@ def get_today_orders_write_into_excel(access_token, token_type) -> None:
                 f_out.write(json.dumps(order, ensure_ascii=False) + "\n")
 
         df = pd.read_json(ndjson_path, lines=True)
+        # Keep only selected keys before saving
+        df = keep_only_keys(df, KEYS_FROM_JSON_RESPONSE).reindex(columns=KEYS_FROM_JSON_RESPONSE)
         df.to_excel(xlsx_path, index=False, engine="openpyxl")
     else:
-        pd.DataFrame([{"orders": 0, "createdAt": today}]).to_excel(xlsx_path, index=False, engine="openpyxl")
+        # 👇 Add back the simple "no orders" row
+        pd.DataFrame([{"orders": 0, "createdAt": today}]).to_excel(
+            xlsx_path, index=False, engine="openpyxl"
+        )
 
     print("Today orders written to excel")
 
@@ -551,6 +640,9 @@ def get_today_orders_write_into_excel(access_token, token_type) -> None:
 # Main
 # -----------------------------
 def main() -> None:
+    global access_token
+    global token_type
+
     access_token, token_type = get_access_token()
 
     # Run weekly (e.g., every Monday): append-only, skip existing weeks
@@ -562,20 +654,20 @@ def main() -> None:
         spacer_rows=10
     )
 
-    # Daily rolling summary with top-insert (TODAY then YESTERDAY)
-    daily_summary_orders_into_excel(
-        access_token=access_token,
-        token_type=token_type,
-        output_path=DEFAULT_MAIN_XLSX,
-        sheet_name=DEFAULT_SHEET,
-        spacer_rows=3
-    )
+    # # Daily rolling summary with top-insert (TODAY then YESTERDAY)
+    # daily_summary_orders_into_excel(
+    #     access_token=access_token,
+    #     token_type=token_type,
+    #     output_path=DEFAULT_MAIN_XLSX,
+    #     sheet_name=DEFAULT_SHEET,
+    #     spacer_rows=3
+    # )
 
-    # Get today orders
-    get_today_orders_write_into_excel(
-        access_token=access_token,
-        token_type=token_type
-    )
+    # Get today orders (per-day file)
+    # get_today_orders_write_into_excel(
+    #     access_token=access_token,
+    #     token_type=token_type
+    # )
 
 if __name__ == "__main__":
     main()
