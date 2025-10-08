@@ -119,8 +119,8 @@ def get_all_orders(date_start: str, date_end: str, batch_size: int = 500, max_pa
 
     return combine_orders_xml_strings(*combined_chunks)
 
-def unas_token(UNAS_API_KEY) -> None:
-    token = unas_login(UNAS_API_KEY)
+def unas_token(unas_api_key) -> None:
+    token = unas_login(unas_api_key)
     print(f"Token OK: {token[:8]}...")
     set_token(token)
 
@@ -174,6 +174,7 @@ def _existing_week_labels_in_sheet(ws) -> set[str]:
             lab = val.replace("Week: ", "").strip()
             if lab:
                 labels.add(lab)
+
     return labels
 
 def weekly_ranges_between(start_dt: date, end_dt: date) -> list[tuple[date, date]]:
@@ -279,6 +280,7 @@ def weekly_ranges_back(months=1, fmt="%Y.%m.%d") -> list:
             "start": prev_monday.strftime(fmt),
             "end": prev_sunday.strftime(fmt),
         })
+
         prev_monday -= timedelta(days=7)
         prev_sunday -= timedelta(days=7)
         weeks_ago += 1
@@ -419,6 +421,9 @@ def export_xml_file_to_excel_one_sheet(xml_path: str, out_xlsx: Optional[str] = 
     if out_xlsx is None:
         out_xlsx = f"{os.path.splitext(xml_path)[0]}.xlsx"
     df = xml_file_to_dataframe(xml_path)
+
+    if df.empty:
+        df = pd.DataFrame([{"orders": "0"}])
 
     return write_dataframe_to_new_excel(df, out_xlsx, sheet_name=sheet_name)
 

@@ -8,9 +8,9 @@ load_dotenv()
 UNAS_API_BASE = os.getenv('UNAS_API_BASE')
 
 def build_monthly_workbook_for_previous_weeks(
-        months_back: int = 3,
-        out_xlsx: str = "data/orders_unas_by_month.xlsx",
-        spacer_rows: int = 3
+        months_back: int,
+        out_xlsx: str,
+        spacer_rows: int
 ) -> str:
     """
     APPEND-ONLY, IDEMPOTENT:
@@ -103,7 +103,7 @@ def fetch_today_orders_and_export_excel(out_path: str, day_else: Optional[str] =
 
     src_xml = f"../data/{fname_xml}"
     out_xlsx = out_path
-    export_xml_file_to_excel_one_sheet(src_xml, out_xlsx)
+    export_xml_file_to_excel_one_sheet(src_xml, out_xlsx, sheet_name="Mai nap")
     print(f"Export kész: {out_xlsx}")
 
     return out_xlsx
@@ -126,9 +126,10 @@ def fetch_previous_months_orders_and_export_excel() -> None:
 
 
 # -----------------------------
-# Daily job (18:00)
+# Daily job
 # -----------------------------
-def daily_summary_orders_to_excel(output_path: str = "../data/orders_unas_main.xlsx", sheet_name: str = "OrderItems_ALL",
+def daily_summary_orders_to_excel(output_path: str = "../data/orders_unas_main.xlsx",
+                                  sheet_name: str = "Napokra bontva",
                                   spacer_rows: int = 3) -> None:
     today_str = datetime.now().strftime("%Y.%m.%d")
     yday_str = (date.today() - timedelta(days=1)).strftime("%Y.%m.%d")
@@ -153,64 +154,185 @@ def daily_summary_orders_to_excel(output_path: str = "../data/orders_unas_main.x
     print(f"✔ Rotated batches. Top = TODAY({today_str}), below = YESTERDAY(full {yday_str}). File: {output_path}")
 
 
-class Reflexshop:
-    def __init__(self):
-        self.API_KEY = os.getenv("UNAS_API_KEY")
+def combine_excel_files_with_day_and_daily_data(today_file_path: str,
+                                                daily_summary_file_path: str,
+                                                output_path: str) -> None:
+    df1 = pd.read_excel(today_file_path)
+    df2 = pd.read_excel(daily_summary_file_path)
 
-    def __load_today_workbook(self):
-        fetch_today_orders_and_export_excel(out_path="../data/reflexshop_today.xlsx")
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df1.to_excel(writer, sheet_name="Ma", index=False)
+        df2.to_excel(writer, sheet_name="Napok", index=False)
 
-    def __load_daily_summary_workbook(self):
-        daily_summary_orders_to_excel(output_path="../data/reflexshop_daily_summary_orders.xlsx")
+    print(f"Combined {today_file_path} and {daily_summary_file_path} into {output_path}.")
 
-    def __load_prev_months_workbook(self):
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+# ---- Your existing functions (import from your modules) ----
+# from src.unas_helper import unas_token, build_monthly_workbook_for_previous_weeks
+# from src.exporters import fetch_today_orders_and_export_excel, daily_summary_orders_to_excel
+# from src.combiner import combine_excel_files_with_day_and_daily_data
+
+# ----------------------------------------------------------------
+# Core OOP building blocks
+# ----------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ShopConfig:
+    name: str
+    env_key: str                   # ENV var holding the API key
+    folder_slug: str               # folder under ../data/, e.g. "reflexshop"
+    months_back: int = 3
+    spacer_rows: int = 5
+    base_dir: Path = Path("../data")
+
+class ShopBase:
+    """
+    Template Method base class:
+      - handles auth
+      - builds consistent output paths
+      - runs the three loaders and final combine
+    Subclasses only set config (env key + folder slug + nice name).
+    """
+
+    def __init__(self, config: ShopConfig) -> None:
+        self.config = config
+        self._api_key: Optional[str] = os.getenv(config.env_key)
+        self.folder = (config.base_dir / config.folder_slug)
+        self.folder.mkdir(parents=True, exist_ok=True)
+
+        stem = config.folder_slug
+        self.today_out_path = str(self.folder / f"{stem}_today.xlsx")
+        self.daily_out_path = str(self.folder / f"{stem}_daily_summary_orders.xlsx")
+        self.prev_months_out_path = str(self.folder / f"{stem}_by_months_orders.xlsx")
+        self.combined_out_path = str(self.folder / f"{stem}_combined.xlsx")
+
+    # ---- Hooks you can override in subclasses if you ever need custom behavior ----
+    def authenticate(self) -> None:
+        if not self._api_key:
+            raise RuntimeError(f"[{self.config.name}] Missing API key in env: {self.config.env_key}")
+
+        unas_token(self._api_key)
+
+    def load_today_workbook(self) -> None:
+        fetch_today_orders_and_export_excel(out_path=self.today_out_path)
+
+    def load_daily_summary_workbook(self) -> None:
+        daily_summary_orders_to_excel(output_path=self.daily_out_path)
+
+    def load_prev_months_workbook(self) -> None:
         build_monthly_workbook_for_previous_weeks(
-            months_back=3,
-            out_xlsx="../data/reflexshop_by_months.xlsx",
-            spacer_rows=10
+            months_back=self.config.months_back,
+            out_xlsx=self.prev_months_out_path,
+            spacer_rows=self.config.spacer_rows,
         )
 
-    def main(self):
-        unas_token(self.API_KEY)
+    def combine_outputs(self) -> None:
+        combine_excel_files_with_day_and_daily_data(
+            today_file_path=self.today_out_path,
+            daily_summary_file_path=self.daily_out_path,
+            output_path=self.combined_out_path,
+        )
 
-        self.__load_today_workbook()
-        self.__load_daily_summary_workbook()
-        self.__load_prev_months_workbook()
+    # ---- Template method ----
+    def main(self) -> None:
+        self.authenticate()
+
+        self.load_today_workbook()
+        self.load_daily_summary_workbook()
+        self.load_prev_months_workbook()
+
+        self.combine_outputs()
 
 
-class Okostojasjatek:
+class Reflexshop(ShopBase):
     def __init__(self) -> None:
-        self.API_KEY = os.getenv("UNAS_OKOSTOJASJATEK_API_KEY")
+        super().__init__(ShopConfig(
+            name="Reflexshop",
+            env_key="UNAS_REFLEXSHOP_API_KEY",
+            folder_slug="reflexshop",
+        ))
 
-    def __load_today_workbook(self):
-        fetch_today_orders_and_export_excel(out_path="../data/okostojasjatek_today.xlsx")
+class Okostojasjatek(ShopBase):
+    def __init__(self) -> None:
+        super().__init__(ShopConfig(
+            name="Okostojasjatek",
+            env_key="UNAS_OKOSTOJASJATEK_API_KEY",
+            folder_slug="okostojasjatek",
+        ))
 
-    def __load_daily_summary_workbook(self):
-        daily_summary_orders_to_excel(output_path="../data/okostojasjatek_daily_summary_orders.xlsx")
+class Ordoglakatok(ShopBase):
+    def __init__(self) -> None:
+        super().__init__(ShopConfig(
+            name="Ordoglakatok",
+            env_key="UNAS_ORDOGLAKATOK_API_KEY",
+            folder_slug="ordoglakatok",
+        ))
 
-    def __load_prev_months_workbook(self):
-        build_monthly_workbook_for_previous_weeks(
-            months_back=3,
-            out_xlsx=f"../data/okostojasjatek_by_months_orders.xlsx",
-            spacer_rows=10
-        )
+class Tarsas(ShopBase):
+    def __init__(self) -> None:
+        super().__init__(ShopConfig(
+            name="Tarsas",
+            env_key="UNAS_TARSAS_API_KEY",
+            folder_slug="tarsas",
+        ))
 
-    def main(self):
-        unas_token(self.API_KEY)
+class Tarsasjatekdiszkont(ShopBase):
+    def __init__(self) -> None:
+        super().__init__(ShopConfig(
+            name="Tarsasjatekdiszkont",
+            env_key="UNAS_TARSASJATEKDISZKONT_API_KEY",
+            folder_slug="tarsasjatekdiszkont",
+        ))
 
-        self.__load_today_workbook()
-        self.__load_daily_summary_workbook()
-        self.__load_prev_months_workbook()
+class Tarsasjatekvasar(ShopBase):
+    def __init__(self) -> None:
+        super().__init__(ShopConfig(
+            name="Tarsasjatekvasar",
+            env_key="UNAS_TARSASJATEKVASAR_API_KEY",
+            folder_slug="tarsasjatekvasar",
+        ))
 
-# -----------------------------
-# Main
-# -----------------------------
-def main() -> None:
-    reflexshop: Reflexshop = Reflexshop()
-    reflexshop.main()
+class Jatekfarm(ShopBase):
+    def __init__(self) -> None:
+        super().__init__(ShopConfig(
+            name="Jatekfarm",
+            env_key="UNAS_JATEKFARM_API_KEY",
+            folder_slug="jatekfarm",
+        ))
 
-    # okostojasjatek: Okostojasjatek = Okostojasjatek()
-    # okostojasjatek.main()
+class Tarsasjatekrendeles(ShopBase):
+    def __init__(self) -> None:
+        super().__init__(ShopConfig(
+            name="Tarsasjatekrendeles",
+            env_key="UNAS_TARSASJATEKRENDELES_API_KEY",
+            folder_slug="tarsasjatekrendeles",
+        ))
+
+
+
+def run_all_shops() -> None:
+    shops: list[ShopBase] = [
+        Reflexshop(),
+        Okostojasjatek(),
+        Ordoglakatok(),
+        Tarsas(),
+        Tarsasjatekdiszkont(),
+        Tarsasjatekvasar(),
+        Jatekfarm(),
+        Tarsasjatekrendeles(),
+    ]
+    for shop in shops:
+        print(f"==> Running {shop.config.name}")
+        shop.main()
+        print(f"    Done: {shop.combined_out_path}")
 
 if __name__ == "__main__":
-    main()
+    # run a single shop:
+    # Reflexshop().main()
+
+    # or run all:
+    run_all_shops()
