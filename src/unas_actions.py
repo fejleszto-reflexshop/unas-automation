@@ -207,7 +207,7 @@ class ShopBase:
         stem = config.folder_slug
         self.today_out_path = str(self.folder / f"{stem}_today.xlsx")
         self.daily_out_path = str(self.folder / f"{stem}_daily_summary_orders.xlsx")
-        self.prev_months_out_path = str(self.folder / f"{stem}_by_months_orders.xlsx")
+        self.prev_months_out_path = str(self.folder / f"{stem}_workbook.xlsx")
         self.combined_out_path = str(self.folder / f"{stem}_combined.xlsx")
 
     # ---- Hooks you can override in subclasses if you ever need custom behavior ----

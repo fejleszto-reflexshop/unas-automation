@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, Any
 
 import pandas as pd
 
@@ -10,7 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.cloud import bigquery
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -19,17 +19,10 @@ load_dotenv()
 #          CONFIG
 # =========================
 
-# reflexshop
-EXCEL_REFLEXSHOP_PATH = fr"../data/today_unas_{datetime.now().strftime('%Y.%m.%d')}.xlsx"
-EXCEL_REFLEXSHOP_SUMMARY_PATH = fr"../data/orders_unas_main.xlsx"
-EXCEL_REFLEXSHOP_WORKBOOK_PATH = fr"../data/orders_unas_by_month.xlsx"
-
 # popfanatic
 EXCEL_POPFANATIC_TODAY_PATH = fr'../data/today_popfanatic_{datetime.now().strftime("%Y-%m-%d")}.xlsx'
 EXCEL_POPFANATIC_SUMMARY_PATH = fr'../data/orders_popfanatic_main.xlsx'
 EXCEL_POPFANATIC_WORKBOOK_PATH = fr'../data/orders_popfanatic_by_month.xlsx'
-
-SHEET_NAME = 0
 
 # Google Drive / Sheets
 PARENT_FOLDER_ID: Optional[str] = None
@@ -40,13 +33,7 @@ PROJECT_ID  = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
 DATASET     = os.getenv("GOOGLE_CLOUD_DATASET")
 BQ_LOCATION = os.getenv("GOOGLE_CLOUD_BQ_LOCATION")
 
-
-PREFIX_REFLEXSHOP_TABLE_NAME = "test-reflexshop-"
 PREFIX_POPFANATIC_TABLE_NAME = "test-popfanatic-"
-
-EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_DAILY   = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Mai rendelések"
-EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_SUMMARY = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Napi összegzés"
-EXTERNAL_TABLE_NAME_REFLEXSHOP_WORKBOOK = f"{PREFIX_REFLEXSHOP_TABLE_NAME}Havi visszatekintés"
 
 EXTERNAL_TABLE_NAME_POPFANATIC_NAME_DAILY = f"{PREFIX_POPFANATIC_TABLE_NAME}Mai rendelések"
 EXTERNAL_TABLE_NAME_POPFANATIC_SUMMATY = f"{PREFIX_POPFANATIC_TABLE_NAME}Napi összegzés"
@@ -281,79 +268,99 @@ def delete_drive_files_by_name(
     return deleted_ids
 
 
-def delete_prev_google_drive_files(drive, fmt: str, shop_prefix: str) -> None:
-    # 1) Delete yesterday's Sheet
-    yesterday_name = f"today_{shop_prefix}_{(datetime.now() - timedelta(days=1)).strftime(fmt)}"
-    today_name = f"today_{shop_prefix}_{(datetime.now()).strftime(fmt)}"
-
-    deleted_yesterday = delete_drive_files_by_name(drive, yesterday_name, PARENT_FOLDER_ID)
+def delete_prev_google_drive_files(drive, shop_prefix: str) -> None:
+    today_name = f"{shop_prefix}_today"
     deletes_today = delete_drive_files_by_name(drive, today_name, PARENT_FOLDER_ID)
-
-    if deleted_yesterday:
-        print(f"🗑️ Deleted {len(deleted_yesterday)} old file(s) named '{yesterday_name}'")
 
     # Check if today file is on Google Drive if yes delete it and upload the new today file
     if deletes_today:
         print(f"🗑️ Deleted {len(deletes_today)} old file(s) named '{today_name}'")
 
-    daily_summary_name = f"orders_{shop_prefix}_main"
-    deletes_summary = delete_drive_files_by_name(drive, daily_summary_name, PARENT_FOLDER_ID)
+    combined_name = f"{shop_prefix}_combined"
+    deletes_combined = delete_drive_files_by_name(drive, combined_name, PARENT_FOLDER_ID)
 
-    if deletes_summary:
-        print(f"Deleted summary file named '{daily_summary_name}'")
+    if deletes_combined:
+        print(f"Deleted summary file named '{combined_name}'")
 
-    workbook_name = f"orders_{shop_prefix}_by_month"
+    workbook_name = f"{shop_prefix}_workbook"
     deleted_workbook = delete_drive_files_by_name(drive, workbook_name, PARENT_FOLDER_ID)
 
     if deleted_workbook:
         print(f"Deleted workbook file named '{workbook_name}'")
 
 def wrapper_upload_to_google_cloud(drive, user_creds, excel_path: list[str], table: list[str], info: list[str]) -> None:
-    sheet_id_today, sheet_link_today = upload_to_google_drive(
+    sheet_id_combined = upload_to_google_drive(
         drive=drive,
         excel_path=excel_path[0],
         info=info[0]
     )
     create_external_table(
-        sheet_id=sheet_id_today,
+        sheet_id=sheet_id_combined,
         table=table[0],
         user_creds=user_creds,
         info=info[0]
     )
 
-    sheet_id_summary, sheet_link_summary = upload_to_google_drive(
+    sheet_id_workbook = upload_to_google_drive(
         drive=drive,
         excel_path=excel_path[1],
         info=info[1]
     )
     create_external_table(
-        sheet_id=sheet_id_summary,
+        sheet_id=sheet_id_workbook,
         table=table[1],
         user_creds=user_creds,
         info=info[1]
     )
 
-    sheet_id_workbook, sheet_link_workbook = upload_to_google_drive(
-        drive=drive,
-        excel_path=excel_path[2],
-        info=info[2]
-    )
-    create_external_table(
-        sheet_id=sheet_id_workbook,
-        table=table[2],
-        user_creds=user_creds,
-        info=info[2]
-    )
+
+def unas_webshops_upload(drive: Any, user_creds: Credentials, exclude_webshop: list[str]) -> None:
+    webshop_folders = [webshop_folders for _, webshop_folders, _ in os.walk("../data")]
+
+    # get folders and flat into one list
+    all_webshop_folders = sum([webshop_folder for webshop_folder in webshop_folders
+                               if webshop_folder not in exclude_webshop and webshop_folder != []], [])
+
+    fnames_in_folders = [fname for folder in all_webshop_folders
+                         for fname in os.listdir(f"../data/{folder}/")
+                         if str(fname).find("daily_summary") == -1 and str(fname).find("today") == -1]
+
+    folder_and_file: dict[str, list[str]] = {}
+
+    for folder in all_webshop_folders:
+        folder_and_file[folder] = []
+        for fname in fnames_in_folders:
+            if str(fname).startswith(folder):
+                folder_and_file[folder].append(fname)
 
 
-def reflexshop_upload(drive, user_creds) -> None:
-    delete_prev_google_drive_files(drive, "%Y.%m.%d", "unas")
+    remaining_folders = len(folder_and_file.keys())
 
-    excel_path: list[str] = [EXCEL_REFLEXSHOP_PATH, EXCEL_REFLEXSHOP_SUMMARY_PATH, EXCEL_REFLEXSHOP_WORKBOOK_PATH]
-    table_path: list[str] = [EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_DAILY, EXTERNAL_TABLE_NAME_REFLEXSHOP_NAME_SUMMARY, EXTERNAL_TABLE_NAME_REFLEXSHOP_WORKBOOK]
-    info: list[str] = ["today", "summary", "workbook"]
+    for folder in folder_and_file.keys():
+        print("Remaining folders: ", remaining_folders)
 
-    wrapper_upload_to_google_cloud(drive, user_creds, excel_path, table_path, info)
+        delete_prev_google_drive_files(drive=drive, shop_prefix=folder)
+
+        excel_path: list[str] = [
+            fr"../data/{folder}/{folder_and_file.get(folder)[0]}",
+            fr"../data/{folder}/{folder_and_file.get(folder)[1]}"
+        ]
+
+        table_path: list[str] = [
+            fr"s-{folder}-napi",
+            fr"s-{folder}-havi",
+        ]
+
+        info: list[str] = ['combined', 'workbook']
+
+        wrapper_upload_to_google_cloud(drive, user_creds, excel_path, table_path, info)
+
+        print("========== next ==========")
+        remaining_folders -= 1
+
+
+def shoprenter_webshops_upload(drive: Any, user_creds: Credentials, exclude_webshop: list[str]) -> None:
+    raise NotImplementedError("TODO")
 
 def popfanatic_upload(drive, user_creds) -> None:
     delete_prev_google_drive_files(drive, "%Y-%m-%d", "popfanatic")
@@ -364,17 +371,14 @@ def popfanatic_upload(drive, user_creds) -> None:
 
     wrapper_upload_to_google_cloud(drive, user_creds, excel_path, table_path, info)
 
-
 def main():
     # OAuth user creds with BOTH scopes (Drive + BigQuery)
-    user_creds = get_oauth_credentials()
+    user_creds: Credentials = get_oauth_credentials()
 
     # Drive client
     drive = build("drive", "v3", credentials=user_creds)
 
-    reflexshop_upload(drive=drive, user_creds=user_creds)
-    print("========== next ==========")
-    popfanatic_upload(drive=drive, user_creds=user_creds)
+    unas_webshops_upload(drive=drive, user_creds=user_creds, exclude_webshop=[""])
 
 
 if __name__ == "__main__":
