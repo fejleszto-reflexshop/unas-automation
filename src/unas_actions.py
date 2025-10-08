@@ -1,6 +1,9 @@
 from src.unas_helper import *
 from src.unas_helper import _existing_week_labels_in_sheet, _get_existing_header, _open_or_init_wb_with_header
-
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 # -----------------------------
 # Setup
 # -----------------------------
@@ -109,20 +112,16 @@ def fetch_today_orders_and_export_excel(out_path: str, day_else: Optional[str] =
     return out_xlsx
 
 
-def fetch_previous_months_orders_and_export_excel() -> None:
-    """(Opcionális régi funkció) Heti fájlok külön xlsx-be."""
+def fetch_previous_months_orders_and_export_excel(shop_name: str) -> None:
+    """(Opcionális régi funkció) Heti fájlok külön xml-be."""
     save_week_ranges()
 
     for week in get_week_ranges().values():
         start_date, end_date = week.split('-')
-        fname_xml = f"week_{start_date}-{end_date}.xml"
+        fname_xml = f"../data/{shop_name}_week_{start_date}-{end_date}.xml"
         write_response_xml_file(get_all_orders(start_date, end_date), fname_xml)
 
-        src_xml = f"../data/{fname_xml}"
-        out_xlsx = f"../data/week_{start_date}-{end_date}.xlsx"
-        export_xml_file_to_excel_one_sheet(src_xml, out_xlsx)
-
-        print("Export ready:", out_xlsx, src_xml)
+        print("Export xml ready:", fname_xml)
 
 
 # -----------------------------
@@ -166,15 +165,6 @@ def combine_excel_files_with_day_and_daily_data(today_file_path: str,
 
     print(f"Combined {today_file_path} and {daily_summary_file_path} into {output_path}.")
 
-import os
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional
-
-# ---- Your existing functions (import from your modules) ----
-# from src.unas_helper import unas_token, build_monthly_workbook_for_previous_weeks
-# from src.exporters import fetch_today_orders_and_export_excel, daily_summary_orders_to_excel
-# from src.combiner import combine_excel_files_with_day_and_daily_data
 
 # ----------------------------------------------------------------
 # Core OOP building blocks
@@ -203,6 +193,9 @@ class ShopBase:
         self._api_key: Optional[str] = os.getenv(config.env_key)
         self.folder = (config.base_dir / config.folder_slug)
         self.folder.mkdir(parents=True, exist_ok=True)
+        self.is_save_workbook_into_excel: bool = False
+        self.workbook_json_path: str = ''
+        self.emails_seen: dict[str, int] = {}
 
         stem = config.folder_slug
         self.today_out_path = str(self.folder / f"{stem}_today.xlsx")
@@ -237,6 +230,27 @@ class ShopBase:
             output_path=self.combined_out_path,
         )
 
+    def save_workbook_into_json(self) -> None:
+        """ call xml_to_json() """
+        if self.is_save_workbook_into_excel:
+            raise NotImplementedError
+
+
+    def xml_to_json(self) -> None:
+        pass
+
+    def count_emails(self) -> None:
+        """ call save_workbook_into_json() """
+
+        with open(self.workbook_json_path, "r") as file:
+            json_data = json.load(file, encoding="utf-8")
+
+        for item in json_data:
+            if item["email"] not in self.emails_seen:
+                self.emails_seen[item["email"]] = 1
+            else:
+                self.emails_seen[item["email"]] += 1
+
     # ---- Template method ----
     def main(self) -> None:
         self.authenticate()
@@ -246,6 +260,8 @@ class ShopBase:
         self.load_prev_months_workbook()
 
         self.combine_outputs()
+
+        self.count_emails()
 
 
 class Reflexshop(ShopBase):
@@ -313,26 +329,34 @@ class Tarsasjatekrendeles(ShopBase):
         ))
 
 
+def run_all_shops(exclude_shop: list[str]) -> None:
+    shops: dict[str, ShopBase] = {
+        "reflexshop": Reflexshop(),
+        "okostojasjatek": Okostojasjatek(),
+        "ordoglakatok": Ordoglakatok(),
+        "tarsas": Tarsas(),
+        "tarsasjatekdiszkont": Tarsasjatekdiszkont(),
+        "tarsasjatekvasar": Tarsasjatekvasar(),
+        "jatekfarm": Jatekfarm(),
+        "tarsasjatekrendeles": Tarsasjatekrendeles(),
+    }
 
-def run_all_shops() -> None:
-    shops: list[ShopBase] = [
-        Reflexshop(),
-        Okostojasjatek(),
-        Ordoglakatok(),
-        Tarsas(),
-        Tarsasjatekdiszkont(),
-        Tarsasjatekvasar(),
-        Jatekfarm(),
-        Tarsasjatekrendeles(),
-    ]
-    for shop in shops:
-        print(f"==> Running {shop.config.name}")
-        shop.main()
-        print(f"    Done: {shop.combined_out_path}")
+    for shop in shops.keys():
+        if shop not in exclude_shop:
+            print(f"==> Running {shops[shop].config.name}")
+            shops[shop].main()
+            print(f"\tDone: {shops[shop].combined_out_path}")
+        else:
+            print(f"==> Skipping {shops[shop].config.name}")
 
 if __name__ == "__main__":
     # run a single shop:
     # Reflexshop().main()
 
+    # exclude shop's e.g. exclude reflexshop
+    run_all_shops(exclude_shop=['reflexshop'])
+
     # or run all:
-    run_all_shops()
+    # run_all_shops(exclude_shop=[''])
+
+

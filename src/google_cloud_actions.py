@@ -289,7 +289,7 @@ def delete_prev_google_drive_files(drive, shop_prefix: str) -> None:
         print(f"Deleted workbook file named '{workbook_name}'")
 
 def wrapper_upload_to_google_cloud(drive, user_creds, excel_path: list[str], table: list[str], info: list[str]) -> None:
-    sheet_id_combined = upload_to_google_drive(
+    sheet_id_combined, _ = upload_to_google_drive(
         drive=drive,
         excel_path=excel_path[0],
         info=info[0]
@@ -301,7 +301,7 @@ def wrapper_upload_to_google_cloud(drive, user_creds, excel_path: list[str], tab
         info=info[0]
     )
 
-    sheet_id_workbook = upload_to_google_drive(
+    sheet_id_workbook, _ = upload_to_google_drive(
         drive=drive,
         excel_path=excel_path[1],
         info=info[1]
@@ -315,24 +315,43 @@ def wrapper_upload_to_google_cloud(drive, user_creds, excel_path: list[str], tab
 
 
 def unas_webshops_upload(drive: Any, user_creds: Credentials, exclude_webshop: list[str]) -> None:
-    webshop_folders = [webshop_folders for _, webshop_folders, _ in os.walk("../data")]
+    """
+    Collect webshop folders under ../data, exclude some by name, gather files
+    (excluding those containing 'daily_summary' or 'today'), and prepare a
+    folder->files mapping. The upload loop is left commented out as in the
+    original snippet.
+    """
 
-    # get folders and flat into one list
-    all_webshop_folders = sum([webshop_folder for webshop_folder in webshop_folders
-                               if webshop_folder not in exclude_webshop and webshop_folder != []], [])
+    # --- collect top-level subfolders under ../data
+    try:
+        _, dirs, _ = next(os.walk("../data"))
+    except StopIteration:
+        print("No ../data directory found or it's empty.")
+        return
 
-    fnames_in_folders = [fname for folder in all_webshop_folders
-                         for fname in os.listdir(f"../data/{folder}/")
-                         if str(fname).find("daily_summary") == -1 and str(fname).find("today") == -1]
+    # --- exclude specific webshops (compare folder names to strings)
+    all_webshop_folders = [d for d in dirs if d not in exclude_webshop]
 
+    print("Webshop folders (after exclude):", all_webshop_folders)
+
+    # --- list files inside each folder, filtering out 'daily_summary' and 'today'
     folder_and_file: dict[str, list[str]] = {}
-
     for folder in all_webshop_folders:
-        folder_and_file[folder] = []
-        for fname in fnames_in_folders:
-            if str(fname).startswith(folder):
-                folder_and_file[folder].append(fname)
+        folder_path = os.path.join("..", "data", folder)
+        try:
+            files = [
+                fname
+                for fname in os.listdir(folder_path)
+                if os.path.isfile(os.path.join(folder_path, fname))
+                and "daily_summary" not in fname
+                and "today" not in fname
+            ]
+        except FileNotFoundError:
+            files = []
+        folder_and_file[folder] = files
 
+    print("Folder -> files mapping:")
+    print(folder_and_file)
 
     remaining_folders = len(folder_and_file.keys())
 
@@ -378,7 +397,7 @@ def main():
     # Drive client
     drive = build("drive", "v3", credentials=user_creds)
 
-    unas_webshops_upload(drive=drive, user_creds=user_creds, exclude_webshop=[""])
+    unas_webshops_upload(drive=drive, user_creds=user_creds, exclude_webshop=[''])
 
 
 if __name__ == "__main__":
