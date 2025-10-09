@@ -1,3 +1,5 @@
+import pandas as pd
+
 from src.unas_helper import *
 from src.unas_helper import _existing_week_labels_in_sheet, _get_existing_header, _open_or_init_wb_with_header
 import os
@@ -230,27 +232,6 @@ class ShopBase:
             output_path=self.combined_out_path,
         )
 
-    def save_workbook_into_json(self) -> None:
-        """ call xml_to_json() """
-        if self.is_save_workbook_into_excel:
-            raise NotImplementedError
-
-
-    def xml_to_json(self) -> None:
-        pass
-
-    def count_emails(self) -> None:
-        """ call save_workbook_into_json() """
-
-        with open(self.workbook_json_path, "r") as file:
-            json_data = json.load(file, encoding="utf-8")
-
-        for item in json_data:
-            if item["email"] not in self.emails_seen:
-                self.emails_seen[item["email"]] = 1
-            else:
-                self.emails_seen[item["email"]] += 1
-
     # ---- Template method ----
     def main(self) -> None:
         self.authenticate()
@@ -260,8 +241,6 @@ class ShopBase:
         self.load_prev_months_workbook()
 
         self.combine_outputs()
-
-        self.count_emails()
 
 
 class Reflexshop(ShopBase):
@@ -349,12 +328,26 @@ def run_all_shops(exclude_shop: list[str]) -> None:
         else:
             print(f"==> Skipping {shops[shop].config.name}")
 
+'''
+napi: adatok 
+rendeles -> | rendeles szam unique, datum, 
+ar | netto ar +  nettositva szallitasi dij + nettositva kezelesi koltseg + kedvezmeny
+'''
+
 if __name__ == "__main__":
     # run a single shop:
     # Reflexshop().main()
 
+    df = pd.read_csv("../data/unas_csv.csv", encoding="utf-8")
+
+
+
+
+
+
+
     # exclude shop's e.g. exclude reflexshop
-    run_all_shops(exclude_shop=['reflexshop'])
+    # run_all_shops(exclude_shop=['reflexshop'])
 
     # or run all:
     # run_all_shops(exclude_shop=[''])

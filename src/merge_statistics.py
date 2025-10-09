@@ -1,9 +1,6 @@
 """
 Merge all webshop into one stats
 and also make for every webshop unique stats
-TODO: filter still on alap... sap9?
-TODO: ido intervallum?  / termekek sheetben
-TODO: email cimek elott a szamok
 """
 from unas_helper import *
 
@@ -27,7 +24,7 @@ def xml_to_json() -> None:
 def get_emails_count() -> dict:
     json_data = json.load(open("../data/yesterday.json", "r", encoding="utf-8"))
 
-    email_seen = dict()
+    email_seen:  dict[str, int] = dict()
 
     for item in json_data["Orders"]['Order']:
         if item['Customer']['Email'] in email_seen:
@@ -53,11 +50,20 @@ def merge_stats() -> None:
 
 
 
+class Kimutatasok:
+    def __init__(self):
+        pass
+
+    def get_month_orders(self):
+        pass
+
 
 
 
 
 def main():
     print(get_emails_count())
+
+
 if __name__ == "__main__":
     main()

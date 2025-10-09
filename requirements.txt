@@ -1,3 +1,4 @@
+selenium
 xmltodict
 openpyxl
 google-api-python-client

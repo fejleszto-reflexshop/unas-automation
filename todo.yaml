@@ -1,10 +1,9 @@
 google drive:
   file: google_cloud_actions.py
-  status: in progress
+  status: done
 
   task:
     [
-      merge big queries into one and make multiple sheets into one excel file
     ]
 
 unas_api:
@@ -13,14 +12,6 @@ unas_api:
 
   task:
     [
-      look for limit max 500
-      optimize code for api response order limits
-    ]
-
-server:
-  task:
-    [
-
     ]
 
 other:
