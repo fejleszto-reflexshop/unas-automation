@@ -70,7 +70,7 @@ def daily_stats(dir_path: str) -> None:
 
     for file in os.listdir(os.path.join(dir_path, "days")):
         print(file)
-        count_orders_into_excel(os.path.join(dir_path, "days", file))
+        summarize_orders_into_excel(os.path.join(dir_path, "days", file))
 
 def year_stats(dir_path: str) -> None:
     for fn in os.listdir(dir_path):
@@ -84,16 +84,43 @@ def year_stats(dir_path: str) -> None:
             wb = load_workbook(new_fname)
             rename_excel_sheet(wb=wb, new_sheet_name=date.today().year.__str__(), path=new_fname)
 
-def count_orders_into_excel(path: str) -> None:
+def summarize_orders_into_excel(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
     rows = len(df)
 
     wb = load_workbook(path)
-    day_name = wb.active.title
+    day_name = wb.active.title  # e.g. "2025-10-05"
 
-    out = pd.DataFrame([{"day": day_name, "orders": rows}])
+    cols_net = ["Nettó Összesen", "Kedvezmény"]
+    cols_gross = ["Szállítási Díj", "Kezelési Költség"]
+    vat_multiplier = 0.73
 
-    out.to_excel(path, index=False)
+    # safely calculate sums
+    net_sum = df[cols_net].sum().sum() if all(col in df.columns for col in cols_net) else 0
+    gross_sum = (df[cols_gross].sum().sum() * vat_multiplier) if all(col in df.columns for col in cols_gross) else 0
+    total_revenue = net_sum + gross_sum
+
+    # one date + blank column
+    out = pd.DataFrame({
+        day_name: [rows, total_revenue],
+        "": ["", ""]
+    }, index=["Orders", "Revenue"])
+
+    return out
+
+
+def merge_all_daily_summaries(dir_path: str):
+    files = sorted([f for f in os.listdir(dir_path) if f.endswith(".xlsx") and f.startswith("day-")])
+    all_data = pd.DataFrame()
+
+    for file in files:
+        file_path = os.path.join(dir_path, file)
+        df_summary = summarize_orders_into_excel(file_path)
+        all_data = pd.concat([all_data, df_summary], axis=1)
+
+    out_path = os.path.join(dir_path, "daily_summary.xlsx")
+    all_data.to_excel(out_path)
+    print(f"✅ Saved merged summary to {out_path}")
 
 
 def main() -> None:
@@ -103,7 +130,7 @@ def main() -> None:
 
     year_stats(dir_path=dir_path)
 
-
+    merge_all_daily_summaries(dir_path=os.path.join(dir_path, "days"))
 
 
 if __name__ == "__main__":

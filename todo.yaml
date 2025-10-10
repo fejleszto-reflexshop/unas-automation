@@ -17,5 +17,5 @@ unas_api:
 other:
   task:
     [
-      clean data from excel files
+
     ]
