@@ -288,29 +288,17 @@ def delete_prev_google_drive_files(drive, shop_prefix: str) -> None:
     if deleted_workbook:
         print(f"Deleted workbook file named '{workbook_name}'")
 
-def wrapper_upload_to_google_cloud(drive, user_creds, excel_path: list[str], table: list[str], info: list[str]) -> None:
+def wrapper_upload_to_google_cloud(drive, user_creds, excel_path: list[str] | str, table: list[str] | str, info: list[str] | str) -> None:
     sheet_id_combined, _ = upload_to_google_drive(
         drive=drive,
-        excel_path=excel_path[0],
-        info=info[0]
+        excel_path=excel_path,
+        info=info
     )
     create_external_table(
         sheet_id=sheet_id_combined,
-        table=table[0],
+        table=table,
         user_creds=user_creds,
-        info=info[0]
-    )
-
-    sheet_id_workbook, _ = upload_to_google_drive(
-        drive=drive,
-        excel_path=excel_path[1],
-        info=info[1]
-    )
-    create_external_table(
-        sheet_id=sheet_id_workbook,
-        table=table[1],
-        user_creds=user_creds,
-        info=info[1]
+        info=info
     )
 
 
@@ -390,6 +378,32 @@ def popfanatic_upload(drive, user_creds) -> None:
 
     wrapper_upload_to_google_cloud(drive, user_creds, excel_path, table_path, info)
 
+
+def update_drive_file() -> None:
+    pass
+
+def main_upload(drive, user_creds) -> None:
+    base_dir = os.getenv("DOWNLOAD_DIR")
+    excel_path: str = f"webshop-{datetime.today().strftime('%Y')}.xlsx"
+
+    file: str = os.path.join(base_dir, excel_path)
+
+    if not os.path.exists(file):
+        print("File not found:", file)
+        raise FileNotFoundError(file)
+
+    wrapper_upload_to_google_cloud(drive=drive,
+                                   user_creds=user_creds,
+                                   excel_path=file,
+                                   table=f"Reflexshop-Oktobertol",
+                                   info="reflexshop oktobertol"
+                                   )
+
+
+    for file in os.listdir("C://Users/marton.aron/Downloads/"):
+        os.remove(os.path.join("C://Users/marton.aron/Downloads/", file))
+
+
 def main():
     # OAuth user creds with BOTH scopes (Drive + BigQuery)
     user_creds: Credentials = get_oauth_credentials()
@@ -397,8 +411,9 @@ def main():
     # Drive client
     drive = build("drive", "v3", credentials=user_creds)
 
-    unas_webshops_upload(drive=drive, user_creds=user_creds, exclude_webshop=[''])
+    # unas_webshops_upload(drive=drive, user_creds=user_creds, exclude_webshop=[''])
 
+    main_upload(drive=drive, user_creds=user_creds)
 
 if __name__ == "__main__":
     main()

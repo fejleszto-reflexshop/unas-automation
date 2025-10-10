@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from selenium import webdriver
 from selenium.webdriver import Keys, ActionChains
@@ -19,9 +19,7 @@ UNAS_URL = os.getenv("UNAS_URL")
 UNAS_USERNAME_LOGIN = os.getenv("UNAS_USERNAME_LOGIN")
 UNAS_PASSWORD_LOGIN = os.getenv("UNAS_PASSWORD_LOGIN")
 
-# Visual speed controls
-TYPE_DELAY = 0.12    # seconds between keystrokes when typing dates
-VIEW_PAUSE = 0.35    # small pauses so you can see changes
+VIEW_PAUSE = 0.35  # small pauses so you can watch changes
 
 options = Options()
 options.add_experimental_option("detach", True)  # keep browser open
@@ -44,16 +42,14 @@ ORDERS_BUTTON = (By.XPATH, '//*[@id="button1_orders_1_0"]')
 EXPORT_BUTTON_FROM_TOOLTIP = (By.XPATH, '//*[@id="tippy-20"]/div/div[1]/div[6]')
 
 EXPORT_DATA_TYPE_SELECT = (By.XPATH, '//*[@id="export"]/form/div[8]/div[2]/div/select')
-# Your absolute XPaths for the masked HU date inputs:
+
 DATE_START_INPUT = (By.XPATH, '/html/body/div[1]/div/div[2]/div[2]/div[1]/div[4]/div/div/form/div[9]/div[2]/div[1]/label/input')
 DATE_END_INPUT   = (By.XPATH, '/html/body/div[1]/div/div[2]/div[2]/div[1]/div[4]/div/div/form/div[9]/div[2]/div[2]/label/input')
 
-CSV_RADIO = (By.XPATH, '//*[@id="format_3"]')
+XLSX_RADIO = (By.XPATH, '//*[@id="format_1"]')
 EXPORT_SUBMIT = (By.XPATH, '//*[@id="button_export"]/button')
 
-# =========================
-#       HELPERS
-# =========================
+
 def open_browser() -> None:
     driver.get(UNAS_URL)
 
@@ -79,143 +75,198 @@ def close_cookies_once():
     except TimeoutException:
         pass  # banner not present
 
-def highlight(el, color="#ff4d4f", thickness=3):
-    """Briefly highlight an element so it's easy to see what's being edited."""
-    driver.execute_script(
-        "arguments[0].setAttribute('data-old-style', arguments[0].getAttribute('style') || '');"
-        "arguments[0].style.outline = arguments[1];"
-        "arguments[0].style.transition = 'outline 0.2s';",
-        el, f"{thickness}px solid {color}"
-    )
+def highlight(el, color="#ff4d4f"):
+    driver.execute_script("arguments[0].style.boxShadow='0 0 0 3px '+arguments[1];", el, color)
     time.sleep(VIEW_PAUSE)
 
 def unhighlight(el):
-    driver.execute_script(
-        "arguments[0].style.outline='';",
-        el
-    )
+    driver.execute_script("arguments[0].style.boxShadow='';", el)
 
-def type_slow(el, text: str, delay: float = TYPE_DELAY):
-    """Type characters one by one with a tiny delay so you can watch it."""
-    for ch in text:
-        el.send_keys(ch)
-        time.sleep(delay)
-
-def set_hu_date(locator, dt):
+def set_date_resilient(locator, dt: datetime, label="date"):
     """
-    Sets a Hungarian masked date input like 'YYYY. MM. DD.' slowly,
-    so you can watch the value being entered.
+    Robustly set a date input that may be either:
+      - <input type="date"> -> needs YYYY-MM-DD
+      - masked text input with HU placeholder 'éééé. hh. nn.' -> needs 'YYYY. MM. DD.'
+    Handles non-breaking spaces and hidden paired inputs; fires input/change/blur.
     """
-    el = wait.until(EC.element_to_be_clickable(locator))
+    el = wait.until(EC.presence_of_element_located(locator))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
     highlight(el)
 
-    date_str = dt.strftime("%Y. %m. %d.")  # HU mask with spaces + trailing dot
+    input_type = (el.get_attribute("type") or "").lower()
+    placeholder = (el.get_attribute("placeholder") or "")
+    current_val = el.get_attribute("value") or ""
+    uses_nbsp = ("\u00a0" in placeholder) or ("\u00a0" in current_val)
+    space_char = "\u00a0" if uses_nbsp else " "
 
-    el.click()
-    time.sleep(VIEW_PAUSE)
+    iso = dt.strftime("%Y-%m-%d")
+    hu  = dt.strftime(f"%Y.{space_char} %m.{space_char} %d.")
 
-    # Clear robustly (masked inputs often ignore .clear())
-    el.send_keys(Keys.CONTROL, "a")  # (use Keys.COMMAND on macOS)
-    time.sleep(TYPE_DELAY)
-    el.send_keys(Keys.DELETE)
-    time.sleep(VIEW_PAUSE)
-
-    # Type slowly so it's visible
-    type_slow(el, date_str, TYPE_DELAY)
-    time.sleep(VIEW_PAUSE)
-    el.send_keys(Keys.TAB)  # commit
-    time.sleep(VIEW_PAUSE)
-
-    # If mask rejected or didn't update correctly, set via JS and fire events
-    if el.get_attribute("value") != date_str:
+    # --- Strategy A: native <input type="date">
+    if input_type == "date":
         driver.execute_script("""
             const el = arguments[0], v = arguments[1];
+            el.focus();
             el.value = v;
+            try { el.valueAsDate = new Date(v); } catch(e) {}
             el.dispatchEvent(new Event('input', {bubbles:true}));
             el.dispatchEvent(new Event('change', {bubbles:true}));
-        """, el, date_str)
+            el.blur();
+        """, el, iso)
         time.sleep(VIEW_PAUSE)
 
+        if (el.get_attribute("value") or "") == iso:
+            print(f"[{label}] set as ISO OK ->", iso)
+            unhighlight(el)
+            return
+
+    # --- Strategy B: masked HU text input
+    driver.execute_script("""
+        const el = arguments[0], v = arguments[1];
+        el.focus();
+        el.value = v;
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        el.blur();
+    """, el, hu)
+    time.sleep(VIEW_PAUSE)
+
+    if (el.get_attribute("value") or "") == hu:
+        print(f"[{label}] set as HU masked OK ->", hu)
+        unhighlight(el)
+        return
+
+    # --- Strategy C: update a hidden paired input next to visible one
+    driver.execute_script("""
+        const el = arguments[0], hu = arguments[1], iso = arguments[2];
+        const root = el.closest('label') || el.parentElement;
+        if (root) {
+            const hidden = root.querySelector('input[type="hidden"], input[data-hidden="true"]');
+            if (hidden) {
+                // prefer ISO for model fields
+                hidden.value = iso;
+                hidden.dispatchEvent(new Event('input', {bubbles:true}));
+                hidden.dispatchEvent(new Event('change', {bubbles:true}));
+            }
+        }
+        // also re-apply visible for UX
+        el.value = hu;
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        el.blur();
+    """, el, hu, iso)
+    time.sleep(VIEW_PAUSE)
+
+    v = el.get_attribute("value") or ""
+    print(f"[{label}] after hidden-pair attempt -> '{v}'")
     unhighlight(el)
 
 def login() -> None:
-    # Close cookies BEFORE interacting with the form
     close_cookies_once()
 
-    # Username
     user = wait.until(EC.presence_of_element_located(USER_INPUT))
     user.clear()
     user.send_keys(UNAS_USERNAME_LOGIN)
 
-    # Password
     pwd = wait.until(EC.presence_of_element_located(PASS_INPUT))
     pwd.clear()
     pwd.send_keys(UNAS_PASSWORD_LOGIN)
     pwd.send_keys(Keys.RETURN)
 
-    # Wait for service select (page re-renders)
     sel = wait.until(EC.presence_of_element_located(SERVICE_SELECT))
-
-    # Cookie banner may reappear after navigation
     close_cookies_once()
 
-    # Pick service via Select API (avoid sending keys to <option>)
     select_widget = Select(sel)
     select_widget.select_by_index(4)  # adjust if needed
 
-    # Enter
     enter_btn = wait.until(EC.element_to_be_clickable(ENTER_BUTTON))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", enter_btn)
     enter_btn.click()
 
 def open_orders_and_download_data() -> None:
-    # Hover Orders
     order_btn = wait.until(EC.visibility_of_element_located(ORDERS_BUTTON))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", order_btn)
     ActionChains(driver).move_to_element(order_btn).perform()
 
-    # Open Export
     export_btn = wait.until(EC.visibility_of_element_located(EXPORT_BUTTON_FROM_TOOLTIP))
     export_btn.click()
 
-    time.sleep(1)
+    time.sleep(0.5)
     html = driver.find_element('tag name', 'html')
     html.send_keys(Keys.PAGE_DOWN)
     html.send_keys(Keys.PAGE_DOWN)
-    time.sleep(1)
+    time.sleep(0.5)
 
-    # Select data type
     select_data_type = wait.until(EC.element_to_be_clickable(EXPORT_DATA_TYPE_SELECT))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_data_type)
-    Select(select_data_type).select_by_index(1)  # 2nd option
 
-    # Set dates in Hungarian format (SLOW & VISIBLE)
-    # TODO: fix issue with pasting date into input field
-    today = datetime.now().strftime('%Y-%m-%d')
+    daily_stats(select_data_type=select_data_type)
 
-    select_start_date = wait.until(
-        EC.presence_of_element_located((By.XPATH, '//*[@id="date_start"]'))
-    )
+    move_daily_to_other_dir()
 
-    select_start_date.send_keys(today)
+    year_stats(select_data_type=select_data_type)
 
-    select_start_date.send_keys(Keys.TAB)
-    select_start_date.send_keys(Keys.TAB)
-    select_start_date.send_keys(Keys.RETURN)
-    select_start_date.send_keys(Keys.TAB)
-    select_start_date.send_keys(Keys.TAB)
-    select_start_date.send_keys(Keys.RETURN)
 
-    # Choose CSV (enable if needed)
-    # csv_radio = wait.until(EC.element_to_be_clickable(CSV_RADIO))
-    # driver.execute_script("arguments[0].scrollIntoView({block:'center'});", csv_radio)
-    # csv_radio.click()
+def daily_stats(select_data_type=None) -> None:
+    Select(select_data_type).select_by_index(1)  # first option
 
-    # Download
-    # download_btn = wait.until(EC.element_to_be_clickable(EXPORT_SUBMIT))
-    # driver.execute_script("arguments[0].scrollIntoView({block:'center'});", download_btn)
-    # download_btn.click()
+    start_date = date(2025, 10, 5)
+    with open("../start_date.txt", "w") as f:
+        f.write(start_date.strftime("%Y-%m-%d"))
+
+    end_date = date.today()
+
+    dates = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
+
+    for date_ in dates:
+        set_date(date_, date_)
+        select_xlsx_format()
+        download_file()
+
+    move_daily_to_other_dir()
+
+def move_daily_to_other_dir() -> None:
+    for file in os.listdir(os.getenv("DOWNLOAD_DIR")):
+        if file.endswith(".xlsx"):
+            os.makedirs(os.path.join(os.getenv("DOWNLOAD_DIR"), "days"), exist_ok=True)
+
+            os.rename(os.path.join(os.getenv("DOWNLOAD_DIR"), file), os.path.join(os.getenv("DOWNLOAD_DIR"), "days", file))
+
+def is_excel_files_exist() -> bool:
+    for file in os.listdir(os.getenv("DOWNLOAD_DIR")):
+        if file.endswith(".xlsx"):
+            return True
+
+    return False
+
+def year_stats(select_data_type=None) -> None:
+    Select(select_data_type).select_by_index(0)
+
+    today = datetime.now()
+    from_october_or_january = datetime(year=today.year, month=10 if today.year == 2025 else 1, day=1)
+
+    while is_excel_files_exist():
+        move_daily_to_other_dir()
+
+    set_date(date_start=from_october_or_january, date_end=today)
+    select_xlsx_format()
+    download_file()
+
+
+def set_date(date_start, date_end) -> None:
+    """ just paste datetime.now() """
+    set_date_resilient(DATE_START_INPUT, date_start, label="start")
+    set_date_resilient(DATE_END_INPUT, date_end, label="end")
+
+def select_xlsx_format() -> None:
+    xlsx_radio = wait.until(EC.element_to_be_clickable(XLSX_RADIO))
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", xlsx_radio)
+    xlsx_radio.click()
+
+def download_file() -> None:
+    download_btn = wait.until(EC.element_to_be_clickable(EXPORT_SUBMIT))
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", download_btn)
+    download_btn.click()
 
 # =========================
 #          MAIN
@@ -224,7 +275,7 @@ def main() -> None:
     open_browser()
     login()
     open_orders_and_download_data()
-    print("✅ Process complete — browser stays open for inspection.")
+
 
 if __name__ == "__main__":
     main()
