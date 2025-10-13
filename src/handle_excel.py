@@ -20,26 +20,22 @@ def rename_excel_sheet(wb: Workbook, new_sheet_name: str, path: str) -> None:
 def rename_excel(excel_path: str, to: str) -> None:
     os.rename(excel_path, to)
 
-# TODO: termek egysegara, bolt neve
 def filter_excel(excel_path: str) -> None:
     keep_cols: list[str] = ["Rendelés szám", "Vásárló csoport", "E-mail", "Dátum",
                             "Szállítási Mód", "Fizetési Mód", "Megrendelés státusz",
                             "Száll. Város", "Száll. Ir.", "Száll. Ország", "Adószám",
                             "Szállítási Díj", "Kezelési Költség", "Kedvezmény",
-                            "Termék Név", "Cikkszám", "Mennyiség"
+                            "Termék Név", "Cikkszám", "Mennyiség", "Nettó Ár"
                             ]
 
     df = pd.read_excel(excel_path)
 
     df = df[keep_cols]
+    df.rename(columns={"Nettó Ár": "Termék egységára"}, inplace=True)
     df['Bolt neve'] = 'Reflexshop'
 
     df.to_excel(excel_path, index=False)
 
-def create_korrigalt_sheet(wb: Workbook, sheet_name: str, path: str) -> None:
-    ws = wb.create_sheet(sheet_name)
-
-    ws['A1'] = """=QUERY('2025-10'!A:BB;"select Col1, Col3, Col5 where (Col3 contains 'Alapértelmezett' or Col3 contains 'SAP9-Törzsvásárló')  and (Col16 contains 'Számlázva, átadva a futárnak' or Col16 contains 'Személyesen átvéve' or Col16 contains 'Részben számlázva, átadva a futárnak' or Col16 contains 'Előfizetés számlázva') or (Col52 contains 'WELCOMEPACK' and Col52 contains 'KLUBEVES' and Col52 contains 'KLUB3HONAPOS' and Col52 contains 'KLUB6HONAPOS')";1) """
 
 def daily_stats(dir_path: str) -> None:
     with open("../start_date.txt", 'r') as file:
@@ -118,7 +114,7 @@ def merge_all_daily_summaries(dir_path: str):
         df_summary = summarize_orders_into_excel(file_path)
         all_data = pd.concat([all_data, df_summary], axis=1)
 
-    out_path = os.path.join(dir_path, "daily_summary.xlsx")
+    out_path = os.path.join(dir_path, "daily-summary.xlsx")
     all_data.to_excel(out_path)
     print(f"✅ Saved merged summary to {out_path}")
 

@@ -1,7 +1,9 @@
 import os
 from typing import Optional, Any
+import re
 
 import pandas as pd
+import unicodedata
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -28,6 +30,10 @@ EXCEL_POPFANATIC_WORKBOOK_PATH = fr'../data/orders_popfanatic_by_month.xlsx'
 PARENT_FOLDER_ID: Optional[str] = None
 MAKE_LINK_VIEWABLE = True
 
+# Google Sheets IMPORTRANGE source (env)
+GS_SOURCE_SHEET_ID = os.getenv("GS_SOURCE_SHEET_ID")  # the spreadsheet you import FROM
+GS_KLUBTAGSAG_SOURCE_RANGE = os.getenv("GS_KLUBTAGSAG_SOURCE_RANGE")
+
 # BigQuery
 PROJECT_ID  = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
 DATASET     = os.getenv("GOOGLE_CLOUD_DATASET")
@@ -41,62 +47,121 @@ EXTERNAL_TABLE_NAME_POPFANATIC_WORKBOOK = f"{PREFIX_POPFANATIC_TABLE_NAME}Havi v
 
 SHEET_RANGE: Optional[str] = None
 SKIP_ROWS = 1
-AUTO_DETECT_SCHEMA = True
+
+# IMPORTANT: we’ll provide an explicit schema -> no autodetect
+AUTO_DETECT_SCHEMA = False
 
 # OAuth files
 CREDENTIALS_FILE = "../credentials.json"
 TOKEN_FILE       = "../token.json"
 
-SCOPES = [os.getenv("GOOGLE_DRIVE_SCOPE"), os.getenv("GOOGLE_BIG_QUERY")]
+# Scopes
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/bigquery",
+]
 
+# =========================
+#     AUTH / DRIVE / BQ
+# =========================
 
 def get_oauth_credentials() -> Credentials:
     """
     Load OAuth credentials from TOKEN_FILE if present; otherwise run the browser flow
     with CREDENTIALS_FILE. Saves refreshed/obtained token back to TOKEN_FILE.
+    If the existing token is missing required scopes, it will be discarded and re-created.
     """
     creds = None
-    if os.path.exists(TOKEN_FILE):
-        # token.json must have BOTH scopes; if not, delete it and re-run
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    token_path = TOKEN_FILE
+    creds_path = CREDENTIALS_FILE
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(CREDENTIALS_FILE):
-                raise FileNotFoundError(
-                    f"Missing {CREDENTIALS_FILE}. "
-                    "Download an OAuth client ID JSON from Google Cloud Console "
-                    "(APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app) "
-                    "and save it next to this script."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
+    def run_flow() -> Credentials:
+        if not os.path.exists(creds_path):
+            raise FileNotFoundError(
+                f"Missing {creds_path}. Download an OAuth client ID JSON "
+                "from Google Cloud Console (APIs & Services → Credentials → "
+                "Create credentials → OAuth client ID → Desktop app)."
+            )
+        flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+        c = flow.run_local_server(port=0)
+        with open(token_path, "w") as f:
+            f.write(c.to_json())
+        return c
 
-        # Optional: attach quota project to quiet the SDK warning
+    # Try loading existing token
+    if os.path.exists(token_path):
         try:
-            creds = creds.with_quota_project(PROJECT_ID)
+            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+            # If token scopes don’t include all required, force re-auth
+            token_scopes = set(getattr(creds, "scopes", []) or [])
+            required = set(SCOPES)
+            if not required.issubset(token_scopes):
+                # discard bad token
+                try:
+                    os.remove(token_path)
+                except Exception:
+                    pass
+                creds = run_flow()
         except Exception:
-            pass
+            # corrupted token file -> reauth
+            try:
+                os.remove(token_path)
+            except Exception:
+                pass
+            creds = run_flow()
+    else:
+        creds = run_flow()
 
-        with open(TOKEN_FILE, "w") as f:
+    # Refresh if expired
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+        except Exception as e:
+            # If refresh fails with invalid_scope, delete token and re-auth
+            if "invalid_scope" in str(e):
+                try:
+                    os.remove(token_path)
+                except Exception:
+                    pass
+                creds = run_flow()
+            else:
+                raise
+
+    # Optional: attach quota project
+    try:
+        if PROJECT_ID:
+            creds = creds.with_quota_project(PROJECT_ID)
+    except Exception:
+        pass
+
+    # Ensure on-disk token matches latest creds
+    try:
+        with open(token_path, "w") as f:
             f.write(creds.to_json())
+    except Exception:
+        pass
 
     return creds
 
+def only_space_to_underscore(name: str) -> str:
+    return str(name).replace(" ", "_")
 
 def upload_excel_as_google_sheet(
     drive_service,
     excel_path: str,
     parent_folder_id: Optional[str] = None,
     make_link_viewable: bool = False,
+    desired_title: Optional[str] = None,       # NEW: readable name (Hungarian kept)
 ) -> tuple[str, str]:
     """Upload .xlsx to Drive, convert to Google Sheet, return (sheet_id, link)."""
     base_name = os.path.splitext(os.path.basename(excel_path))[0]
+    title = desired_title or base_name
+    # keep Hungarian letters, only spaces -> underscores
+    title = only_space_to_underscore(title)
 
     file_metadata = {
-        "name": base_name,
+        "name": title,
         "mimeType": "application/vnd.google-apps.spreadsheet",
     }
     if parent_folder_id:
@@ -123,7 +188,6 @@ def upload_excel_as_google_sheet(
 
     return sheet_id, sheet_link
 
-
 def create_external_table_pointing_to_sheet(
     project_id: str,
     dataset: str,
@@ -133,26 +197,30 @@ def create_external_table_pointing_to_sheet(
     location: str = "EU",
     sheet_range: Optional[str] = None,
     skip_rows: int = 1,
-    autodetect: bool = True,
+    autodetect: bool = False,
+    provided_bq_cols: list[str] | None = None
 ):
-    """
-    CREATE OR REPLACE a BigQuery EXTERNAL TABLE that points to the Google Sheet.
-    Uses the same OAuth user creds (which now include Drive + BigQuery scopes).
-    """
     client = bigquery.Client(project=project_id, location=location, credentials=credentials)
     table_id = f"{project_id}.{dataset}.{table}"
 
-    # Handle old/new library versions for source format & options
+    # --- source format compat (new SDK has enum, old expects string)
     try:
-        source_fmt = bigquery.SourceFormat.GOOGLE_SHEETS
-    except AttributeError:
-        source_fmt = "GOOGLE_SHEETS"
+        source_fmt = bigquery.SourceFormat.GOOGLE_SHEETS  # new versions
+    except Exception:
+        source_fmt = "GOOGLE_SHEETS"                      # older versions
 
     external_config = bigquery.ExternalConfig(source_fmt)
+
     sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
     external_config.source_uris = [sheet_url]
-    external_config.autodetect = autodetect
 
+    # autodetect flag exists broadly; still guard just in case
+    try:
+        external_config.autodetect = autodetect
+    except Exception:
+        pass
+
+    # --- GoogleSheetsOptions compat (class may not exist on old SDK)
     try:
         gs_opts = bigquery.GoogleSheetsOptions()
         if sheet_range:
@@ -160,16 +228,26 @@ def create_external_table_pointing_to_sheet(
         if skip_rows:
             gs_opts.skip_leading_rows = skip_rows
         external_config.options = gs_opts
-    except AttributeError:
-        pass
+    except Exception:
+        # fall back to setting raw properties for very old SDKs
+        edc = external_config._properties.setdefault("externalDataConfiguration", {})
+        gso = edc.setdefault("googleSheetsOptions", {})
+        edc["sourceFormat"] = "GOOGLE_SHEETS"
+        if sheet_range:
+            gso["range"] = sheet_range
+        if skip_rows:
+            edc["skipLeadingRows"] = skip_rows
 
     table_obj = bigquery.Table(table_id)
     table_obj.external_data_configuration = external_config
 
+    # explicit schema if we disabled autodetect
+    if not autodetect and provided_bq_cols:
+        table_obj.schema = [bigquery.SchemaField(name, "STRING") for name in provided_bq_cols]
+
     client.delete_table(table_id, not_found_ok=True)
     created = client.create_table(table_obj)
     return created, sheet_url
-
 
 def load_excel_to_bigquery_native(
     excel_path: str,
@@ -196,20 +274,19 @@ def load_excel_to_bigquery_native(
     result = load_job.result()
     return result.output_rows
 
-def upload_to_google_drive(drive, excel_path, info) -> tuple:
-
+def upload_to_google_drive(drive, excel_path, info, desired_title: Optional[str] = None) -> tuple:
     sheet_id, sheet_link = upload_excel_as_google_sheet(
         drive_service=drive,
         excel_path=excel_path,
         parent_folder_id=PARENT_FOLDER_ID,
-        make_link_viewable=MAKE_LINK_VIEWABLE
+        make_link_viewable=MAKE_LINK_VIEWABLE,
+        desired_title=desired_title or info,   # readable Hungarian title OK
     )
 
     print(f"✅ Google Sheet {info} created:", sheet_link)
-
     return sheet_id, sheet_link
 
-def create_external_table(sheet_id, table, user_creds, info) -> None:
+def create_external_table(sheet_id, table, user_creds, info, provided_bq_cols: Optional[list[str]] = None) -> None:
     created_table, source_uri = create_external_table_pointing_to_sheet(
         project_id=PROJECT_ID,
         dataset=DATASET,
@@ -219,12 +296,176 @@ def create_external_table(sheet_id, table, user_creds, info) -> None:
         location=BQ_LOCATION,
         sheet_range=SHEET_RANGE,
         skip_rows=SKIP_ROWS,
-        autodetect=AUTO_DETECT_SCHEMA,
+        autodetect=AUTO_DETECT_SCHEMA,            # False -> explicit schema below
+        provided_bq_cols=provided_bq_cols
     )
 
     print(f"✅ External table {info} created: {created_table.full_table_id}")
     print(f"   Source URI {info}: {source_uri}")
 
+# =========================
+#    SHEETS (IMPORTRANGE)
+# =========================
+
+def ensure_sheet_exists(sheets_service, spreadsheet_id: str, sheet_title: str):
+    meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    titles = {s["properties"]["title"] for s in meta.get("sheets", [])}
+    if sheet_title in titles:
+        return
+    requests = [{"addSheet": {"properties": {"title": sheet_title}}}]
+    sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id, body={"requests": requests}
+    ).execute()
+
+def set_klubtagsag_importrange(
+    sheets_service,
+    spreadsheet_id: str,
+    source_sheet_id: str,
+    source_range: str = "Előfizetői kategória!A:A",
+    target_tab: str = "Klubtagsag",
+    target_cell: str = "A1",
+) -> None:
+    """
+    Creates 'Klubtagsag' tab (if missing) and writes the IMPORTRANGE formula into A1.
+    """
+    ensure_sheet_exists(sheets_service, spreadsheet_id, target_tab)
+    formula = f'=IMPORTRANGE("https://docs.google.com/spreadsheets/d/{source_sheet_id}";"{source_range}")'
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"{target_tab}!{target_cell}",
+        valueInputOption="USER_ENTERED",
+        body={"values": [[formula]]}
+    ).execute()
+    print("✅ Klubtagsag IMPORTRANGE set.")
+
+
+def create_sheet_if_missing(sheets_service, spreadsheet_id: str, sheet_name: str) -> None:
+    """Ensure a sheet with the given name exists."""
+    meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    titles = {s["properties"]["title"] for s in meta.get("sheets", [])}
+    if sheet_name not in titles:
+        request = {"addSheet": {"properties": {"title": sheet_name}}}
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [request]}
+        ).execute()
+
+
+def set_korrigalt_query_sheet(sheets_service, spreadsheet_id: str) -> None:
+    """
+    Creates a sheet named '<year>-Korrigalt' and inserts the given QUERY formula into A1.
+    """
+    year_str = str(datetime.today().year)
+    sheet_name = f"{year_str}-Korrigalt"
+
+    create_sheet_if_missing(sheets_service, spreadsheet_id, sheet_name)
+
+    # A1 — 3 columns
+    formula_A1 = (
+        "=QUERY(Sheet1!A:S;"
+        "\"select Col1, Col2, Col3 "
+        "where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$') "
+        "and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') "
+        "or (Col16 contains 'WELCOMEPACK' or Col16 contains 'KLUBEVES' or Col16 contains 'KLUB3HONAPOS' or Col16 contains 'KLUB6HONAPOS')\";1)"
+    )
+
+    # D1 — just Col18
+    formula_D1 = (
+        "=QUERY(Sheet1!A:S;"
+        "\"select Col18 "
+        "where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$') "
+        "and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') "
+        "or (Col16 contains 'WELCOMEPACK' or Col16 contains 'KLUBEVES' or Col16 contains 'KLUB3HONAPOS' or Col16 contains 'KLUB6HONAPOS')\";1)"
+    )
+
+    # E1 — just Col4 (Dátum)
+    formula_E1 = (
+        "=QUERY(Sheet1!A:S;"
+        "\"select Col4 "
+        "where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$') "
+        "and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') "
+        "or (Col16 contains 'WELCOMEPACK' or Col16 contains 'KLUBEVES' or Col16 contains 'KLUB3HONAPOS' or Col16 contains 'KLUB6HONAPOS')\";1)"
+    )
+
+    formula_F1 = """=ARRAYFORMULA(HA(ARRAYFORMULA( HA( SZÁM(SZÖVEG.KERES("GLS - csomagautomata"; ))); "GLS - csomagautomata"; HA( SZÁM(SZÖVEG.KERES("GLS - csomagpont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - csomagpont"; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 1."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 1."; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 2."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 2."; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 3."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 3."; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 4."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 4."; HA( SZÁM(SZÖVEG.KERES("GLS Futárszolgálat"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS Futárszolgálat"; HA( SZÁM(SZÖVEG.KERES("MPL csomagautomata"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL csomagautomata"; HA( SZÁM(SZÖVEG.KERES("MPL házhozszállítás"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL házhozszállítás"; HA( SZÁM(SZÖVEG.KERES("MPL posta pont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL posta pont"; HA( SZÁM(SZÖVEG.KERES("MPL postán maradó"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL postán maradó"; HA( SZÁM(SZÖVEG.KERES("Személyes átvétel - Buda"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Személyes átvétel - Buda"; HA( SZÁM(SZÖVEG.KERES("Személyes átvétel - Debrecen"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Személyes átvétel - Debrecen"; HA( SZÁM(SZÖVEG.KERES("Személyes átvétel - Pest"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Személyes átvétel - Pest"; HA( SZÁM(SZÖVEG.KERES("MPL Postán maradó"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL postán maradó"; HA( SZÁM(SZÖVEG.KERES("GLS Csomagpont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - csomagpont"; HA( SZÁM(SZÖVEG.KERES("Express One csomagpont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Express One csomagpont"; HA( SZÁM(SZÖVEG.KERES("Packeta csomagpont és csomagautomata"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Packeta csomagpont és csomagautomata"; HA( SZÁM(SZÖVEG.KERES("GLS Csomagautomata"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - csomagautomata"; HA( SZÁM(SZÖVEG.KERES("Express One házhozszállítás"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Express One házhozszállítás"; HA( SZÁM(SZÖVEG.KERES("Előfizetés szállítás"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Előfizetés"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1) ) ))))) ) ) ) ) ) ) ) ) ) ) ) ) ) ) ) )="";HA(N:N="WELCOMEPACK";"GLS Futárszolgálat";"Előfizetés"); ARRAYFORMULA( HA( SZÁM(SZÖVEG.KERES("GLS - csomagautomata"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - csomagautomata"; HA( SZÁM(SZÖVEG.KERES("GLS - csomagpont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - csomagpont"; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 1."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 1."; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 2."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 2."; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 3."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 3."; HA( SZÁM(SZÖVEG.KERES("GLS - Nemzetközi 4."; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - Nemzetközi 4."; HA( SZÁM(SZÖVEG.KERES("GLS Futárszolgálat"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS Futárszolgálat"; HA( SZÁM(SZÖVEG.KERES("MPL csomagautomata"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL csomagautomata"; HA( SZÁM(SZÖVEG.KERES("MPL házhozszállítás"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL házhozszállítás"; HA( SZÁM(SZÖVEG.KERES("MPL posta pont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL posta pont"; HA( SZÁM(SZÖVEG.KERES("MPL postán maradó"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL postán maradó"; HA( SZÁM(SZÖVEG.KERES("Személyes átvétel - Buda"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Személyes átvétel - Buda"; HA( SZÁM(SZÖVEG.KERES("Személyes átvétel - Debrecen"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Személyes átvétel - Debrecen"; HA( SZÁM(SZÖVEG.KERES("Személyes átvétel - Pest"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Személyes átvétel - Pest"; HA( SZÁM(SZÖVEG.KERES("MPL Postán maradó"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "MPL postán maradó"; HA( SZÁM(SZÖVEG.KERES("GLS Csomagpont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - csomagpont"; HA( SZÁM(SZÖVEG.KERES("Packeta csomagpont és csomagautomata"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Packeta csomagpont és csomagautomata"; HA( SZÁM(SZÖVEG.KERES("Express One csomagpont"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Express One csomagpont"; HA( SZÁM(SZÖVEG.KERES("GLS Csomagautomata"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "GLS - csomagautomata"; HA( SZÁM(SZÖVEG.KERES("Express One házhozszállítás"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Express One házhozszállítás"; HA( SZÁM(SZÖVEG.KERES("Előfizetés szállítás"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1))); "Előfizetés"; QUERY('Sheet1'!A:S;"select Col5 where where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$) and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1)))))))))))))))))))))))))"""
+
+    # G1 — multiple columns
+    formula_G1 = (
+        "=QUERY(Sheet1!A:S;"
+        "\"select Col6, Col7, Col9, Col10, Col8, Col11 "
+        "where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$') "
+        "and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') "
+        "or (Col16 contains 'WELCOMEPACK' or Col16 contains 'KLUBEVES' or Col16 contains 'KLUB3HONAPOS' or Col16 contains 'KLUB6HONAPOS')\";1)"
+    )
+
+    formula_M1 = """=QUERY(ARRAYFORMULA(IFERROR(ÉRTÉK(QUERY(Sheet1!A:S;"select Col17 where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\s*$') and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' or Col16 contains 'KLUBEVES' or Col16 contains 'KLUB3HONAPOS' or Col16 contains 'KLUB6HONAPOS')";1))));"select Col1 label Col1 'Termék mennyisége'";0)"""
+
+    # N1 — coupon / Col16
+    formula_N1 = (
+        "=QUERY(Sheet1!A:S;"
+        "\"select Col16 "
+        "where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló' or Col2 is null or Col2 matches '^\\\\s*$') "
+        "and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') "
+        "or (Col16 contains 'WELCOMEPACK' or Col16 contains 'KLUBEVES' or Col16 contains 'KLUB3HONAPOS' or Col16 contains 'KLUB6HONAPOS')\";1)"
+    )
+
+    formula_O1 = """=query(ARRAYFORMULA(ÉRTÉK(HELYETTE(QUERY(to_text('Sheet1'!A:S);"select Col18 where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló') and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1);".";",")));"select * label Col1 'Termék egységára'")"""
+
+    formula_P1 = """={"Rendelés nettó részösszege";ARRAYFORMULA(HA(M2:M="";"";(M2:M*O2:O)))}"""
+
+    formula_Q1 = """={"Összesített Áfa kulcs";ARRAYFORMULA(ifna(FKERES(N2:N;'ÁFA kulcsok'!A:B;2;HAMIS);""))}"""
+
+    formula_R1 = """={"Rendelés bruttó részösszege";ARRAYFORMULA(HA(M2:M="";"";(KEREK.FEL(P2:P*(1+(Q2:Q/100));1))))}"""
+
+    formula_S1 = """=query(ARRAYFORMULA(ARRAYFORMULA(ÉRTÉK(HELYETTE(QUERY(to_text('Sheet1'!A:S);"select Col12 where (Col2 contains 'Alapértelmezett' or Col2 contains 'SAP9-Törzsvásárló') and (Col7 contains 'Számlázva, átadva a futárnak' or Col7 contains 'Személyesen átvéve' or Col7 contains 'Részben számlázva, átadva a futárnak' or Col7 contains 'Előfizetés számlázva') or (Col16 contains 'WELCOMEPACK' and Col16 contains 'KLUBEVES' and Col16 contains 'KLUB3HONAPOS' and Col16 contains 'KLUB6HONAPOS')";1);".";",")))/DARABHATÖBB(A:A;A:A));"select * label Col1 'Szállítási díj'")"""
+    sheets_service.spreadsheets().values().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "valueInputOption": "USER_ENTERED",
+            "data": [
+                {"range": f"{sheet_name}!A1", "values": [[formula_A1]]},
+                {"range": f"{sheet_name}!D1", "values": [[formula_D1]]},
+                {"range": f"{sheet_name}!E1", "values": [[formula_E1]]},
+                # {"range": f"{sheet_name}!F1", "values": [[formula_F1]]},
+                {"range": f"{sheet_name}!G1", "values": [[formula_G1]]},
+                {"range": f"{sheet_name}!M1", "values": [[formula_M1]]},
+                {"range": f"{sheet_name}!N1", "values": [[formula_N1]]},
+                {"range": f"{sheet_name}!O1", "values": [[formula_O1]]},
+                {"range": f"{sheet_name}!P1", "values": [[formula_P1]]},
+                {"range": f"{sheet_name}!Q1", "values": [[formula_Q1]]},
+                {"range": f"{sheet_name}!R1", "values": [[formula_R1]]},
+                {"range": f"{sheet_name}!S1", "values": [[formula_S1]]},
+
+            ],
+        },
+    ).execute()
+
+    print(f"✅ Added sheet '{sheet_name}' with QUERY formulas.")
+
+def create_afa_kulcsok_sheet(sheets_service, spreadsheet_id: str) -> None:
+    sheet_name = f"ÁFA kulcsok"
+
+    create_sheet_if_missing(sheets_service, spreadsheet_id, sheet_name)
+
+    formula_A1 = """=IMPORTRANGE("1Q6njvwWkLRS_ZVMcbksXNy9gysDfRdGUVxInln7P9O0";"fő!A:A")"""
+    formula_B1 = """=IMPORTRANGE("1Q6njvwWkLRS_ZVMcbksXNy9gysDfRdGUVxInln7P9O0";"fő!C:C")"""
+
+    sheets_service.spreadsheets().values().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "valueInputOption": "USER_ENTERED",
+            "data": [
+                {"range": f"{sheet_name}!A1", "values": [[formula_A1]]},
+                {"range": f"{sheet_name}!B1", "values": [[formula_B1]]},
+            ]
+        }
+    ).execute()
+
+    print(f"✅ Added sheet '{sheet_name}' with IMPORTRANGE formula.")
+
+
+# =========================
+#      DRIVE UTILITIES
+# =========================
 
 def delete_drive_files_by_name(
     drive,
@@ -267,62 +508,160 @@ def delete_drive_files_by_name(
 
     return deleted_ids
 
-
-def delete_prev_google_drive_files(drive, shop_prefix: str) -> None:
-    today_name = f"{shop_prefix}_today"
-    deletes_today = delete_drive_files_by_name(drive, today_name, PARENT_FOLDER_ID)
+def delete_prev_google_drive_files(drive) -> None:
+    daily_name = f"daily_summary"
+    deletes_today = delete_drive_files_by_name(drive, daily_name, PARENT_FOLDER_ID)
 
     # Check if today file is on Google Drive if yes delete it and upload the new today file
     if deletes_today:
-        print(f"🗑️ Deleted {len(deletes_today)} old file(s) named '{today_name}'")
+        print(f"🗑️ Deleted {len(deletes_today)} old file(s) named '{daily_name}'")
 
-    combined_name = f"{shop_prefix}_combined"
-    deletes_combined = delete_drive_files_by_name(drive, combined_name, PARENT_FOLDER_ID)
-
-    if deletes_combined:
-        print(f"Deleted summary file named '{combined_name}'")
-
-    workbook_name = f"{shop_prefix}_workbook"
+    workbook_name = f"year-{datetime.now().strftime('%Y')}"
     deleted_workbook = delete_drive_files_by_name(drive, workbook_name, PARENT_FOLDER_ID)
 
     if deleted_workbook:
         print(f"Deleted workbook file named '{workbook_name}'")
 
-def wrapper_upload_to_google_cloud(drive, user_creds, excel_path: list[str] | str, table: list[str] | str, info: list[str] | str) -> None:
-    sheet_id_combined, _ = upload_to_google_drive(
+# =========================
+#   HEADER SANITIZATION
+# =========================
+
+def ascii_bq_safe(name: str) -> str:
+    # strip accents to ASCII, then enforce [A-Za-z0-9_], start with letter/_
+    s = unicodedata.normalize('NFKD', name)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))  # remove accents
+    s = re.sub(r'[^A-Za-z0-9_]', '_', s)
+    if re.match(r'^[0-9]', s):
+        s = f'col_{s}'
+    if not s:
+        s = 'col'
+    return s
+
+def sanitize_excel_headers_for_bq(in_xlsx: str, sheet_name=0, output_name: str | None = None):
+    """
+    - Drops 'Unnamed:' columns.
+    - Keeps Hungarian letters in the SHEET headers; only spaces -> underscores.
+    - Ensures display header uniqueness.
+    - Saves a cleaned Excel copy (readable filename).
+    - Returns (out_path, bq_cols) where bq_cols are ASCII-safe names for BigQuery schema.
+    """
+    df = pd.read_excel(in_xlsx, sheet_name=sheet_name)
+
+    # 1) drop unnamed columns
+    mask_named = ~df.columns.to_series().astype(str).str.match(r'^Unnamed')
+    df = df.loc[:, mask_named]
+
+    # 2) keep Hungarian in SHEET headers, only space→underscore
+    human_cols = [only_space_to_underscore(c) for c in df.columns]
+    # ensure uniqueness for display too
+    seen = {}
+    final_human = []
+    for c in human_cols:
+        if c not in seen:
+            seen[c] = 1
+            final_human.append(c)
+        else:
+            seen[c] += 1
+            final_human.append(f"{c}_{seen[c]}")
+    df.columns = final_human
+
+    # 3) save cleaned Excel next to input
+    if output_name is None:
+        base, ext = os.path.splitext(os.path.basename(in_xlsx))
+        output_name = f"{base}_cleaned.xlsx"
+    out_path = os.path.join(os.path.dirname(in_xlsx), output_name)
+    df.to_excel(out_path, index=False)
+
+    # 4) ALSO return a BigQuery-safe schema (ASCII) in the same order
+    bq_cols = []
+    seen_bq = {}
+    for c in final_human:
+        safe = ascii_bq_safe(c)
+        if safe not in seen_bq:
+            seen_bq[safe] = 1
+            bq_cols.append(safe)
+        else:
+            seen_bq[safe] += 1
+            bq_cols.append(f"{safe}_{seen_bq[safe]}")
+
+    return out_path, bq_cols
+
+# =========================
+#        WORKFLOW
+# =========================
+
+def wrapper_upload_to_google_cloud(
+    drive,
+    user_creds,
+    excel_path: str,
+    table: str,
+    info: str,
+    *,
+    # New: pass sheets service and IMPORTRANGE config; used only when we want Klubtagsag
+    sheets_service=None,
+    add_klubtagsag: bool = False,
+    importrange_source_sheet_id: Optional[str] = None,
+    importrange_source_range: Optional[str] = None,
+) -> None:
+    # Clean headers (keep Hungarian visually), and build BigQuery-safe schema
+    cleaned_xlsx, bq_cols = sanitize_excel_headers_for_bq(excel_path, output_name="napi.xlsx")
+
+    # Upload to Drive as Google Sheet; keep Hungarian title, spaces -> _
+    desired_title = f"{info}"
+    sheet_id, _ = upload_to_google_drive(
         drive=drive,
-        excel_path=excel_path,
-        info=info
-    )
-    create_external_table(
-        sheet_id=sheet_id_combined,
-        table=table,
-        user_creds=user_creds,
-        info=info
+        excel_path=cleaned_xlsx,
+        info=info,
+        desired_title=desired_title
     )
 
+    # If asked, create Klubtagsag tab and set IMPORTRANGE on the Google Sheet
+    if add_klubtagsag:
+        if sheets_service is None:
+            sheets_service = build("sheets", "v4", credentials=user_creds)
+        if not importrange_source_sheet_id:
+            importrange_source_sheet_id = GS_SOURCE_SHEET_ID
+        if not importrange_source_range:
+            importrange_source_range = GS_KLUBTAGSAG_SOURCE_RANGE
+
+        set_klubtagsag_importrange(
+            sheets_service=sheets_service,
+            spreadsheet_id=sheet_id,
+            source_sheet_id=importrange_source_sheet_id,
+            source_range=importrange_source_range,
+        )
+
+        set_korrigalt_query_sheet(
+            sheets_service=sheets_service,
+            spreadsheet_id=sheet_id
+        )
+
+        create_afa_kulcsok_sheet(sheets_service=sheets_service, spreadsheet_id=sheet_id)
+
+    # Create external table with explicit schema (no autodetect)
+    create_external_table(
+        sheet_id=sheet_id,
+        table=table,
+        user_creds=user_creds,
+        info=info,
+        provided_bq_cols=bq_cols
+    )
 
 def unas_webshops_upload(drive: Any, user_creds: Credentials, exclude_webshop: list[str]) -> None:
     """
     Collect webshop folders under ../data, exclude some by name, gather files
     (excluding those containing 'daily_summary' or 'today'), and prepare a
-    folder->files mapping. The upload loop is left commented out as in the
-    original snippet.
+    folder->files mapping. Demonstrates per-file upload.
     """
-
-    # --- collect top-level subfolders under ../data
     try:
         _, dirs, _ = next(os.walk("../data"))
     except StopIteration:
         print("No ../data directory found or it's empty.")
         return
 
-    # --- exclude specific webshops (compare folder names to strings)
     all_webshop_folders = [d for d in dirs if d not in exclude_webshop]
-
     print("Webshop folders (after exclude):", all_webshop_folders)
 
-    # --- list files inside each folder, filtering out 'daily_summary' and 'today'
     folder_and_file: dict[str, list[str]] = {}
     for folder in all_webshop_folders:
         folder_path = os.path.join("..", "data", folder)
@@ -343,77 +682,128 @@ def unas_webshops_upload(drive: Any, user_creds: Credentials, exclude_webshop: l
 
     remaining_folders = len(folder_and_file.keys())
 
-    for folder in folder_and_file.keys():
+    for folder, files in folder_and_file.items():
         print("Remaining folders: ", remaining_folders)
 
-        delete_prev_google_drive_files(drive=drive, shop_prefix=folder)
+        # Clean out previous generic names
+        delete_prev_google_drive_files(drive=drive)
 
-        excel_path: list[str] = [
-            fr"../data/{folder}/{folder_and_file.get(folder)[0]}",
-            fr"../data/{folder}/{folder_and_file.get(folder)[1]}"
-        ]
-
-        table_path: list[str] = [
-            fr"s-{folder}-napi",
-            fr"s-{folder}-havi",
-        ]
-
-        info: list[str] = ['combined', 'workbook']
-
-        wrapper_upload_to_google_cloud(drive, user_creds, excel_path, table_path, info)
+        # Example: upload first two files (if present)
+        for idx, fname in enumerate(files[:2], start=1):
+            local_path = os.path.join("..", "data", folder, fname)
+            table_name = f"s-{folder}-{'napi' if idx == 1 else 'havi'}"
+            info = f"{folder} {'combined' if idx == 1 else 'workbook'}"
+            wrapper_upload_to_google_cloud(drive, user_creds, local_path, table_name, info)
 
         print("========== next ==========")
         remaining_folders -= 1
 
-
-def shoprenter_webshops_upload(drive: Any, user_creds: Credentials, exclude_webshop: list[str]) -> None:
-    raise NotImplementedError("TODO")
-
 def popfanatic_upload(drive, user_creds) -> None:
-    delete_prev_google_drive_files(drive, "%Y-%m-%d", "popfanatic")
+    # Clean previous generic files
+    delete_prev_google_drive_files(drive)
 
-    excel_path: list[str] = [EXCEL_POPFANATIC_TODAY_PATH, EXCEL_POPFANATIC_SUMMARY_PATH, EXCEL_POPFANATIC_WORKBOOK_PATH]
-    table_path: list[str] = [EXTERNAL_TABLE_NAME_POPFANATIC_NAME_DAILY, EXTERNAL_TABLE_NAME_POPFANATIC_SUMMATY, EXTERNAL_TABLE_NAME_POPFANATIC_WORKBOOK]
-    info: list[str] = ["today", "summary", "workbook"]
+    file_list = [
+        (EXCEL_POPFANATIC_TODAY_PATH,    EXTERNAL_TABLE_NAME_POPFANATIC_NAME_DAILY, "popfanatic today"),
+        (EXCEL_POPFANATIC_SUMMARY_PATH,  EXTERNAL_TABLE_NAME_POPFANATIC_SUMMATY,    "popfanatic summary"),
+        (EXCEL_POPFANATIC_WORKBOOK_PATH, EXTERNAL_TABLE_NAME_POPFANATIC_WORKBOOK,   "popfanatic workbook"),
+    ]
 
-    wrapper_upload_to_google_cloud(drive, user_creds, excel_path, table_path, info)
+    for path, table, info in file_list:
+        if os.path.exists(path):
+            wrapper_upload_to_google_cloud(drive, user_creds, path, table, info)
+        else:
+            print("⚠️ Missing file, skipping:", path)
 
+def create_table_pointing_to_yearly_summary(drive, user_creds, sheets_service) -> None:
+    base_dir = os.getenv("DOWNLOAD_DIR")
+    excel_path: str = os.path.join(base_dir, f"year-{datetime.today().year}.xlsx")
 
-def update_drive_file() -> None:
-    pass
+    wrapper_upload_to_google_cloud(
+        drive=drive,
+        user_creds=user_creds,
+        excel_path=excel_path,
+        table=f"yearly-summary",
+        info=f"yearly-summary",
+        sheets_service=sheets_service
+    )
+
+def create_table_pointing_to_daily_summary(drive, user_creds, sheets_service) -> None:
+    base_dir: str = os.getenv("DOWNLOAD_DIR")
+    excel_path: str = os.path.join(base_dir, "days", f"daily-summary.xlsx")
+
+    wrapper_upload_to_google_cloud(
+        drive=drive,
+        user_creds=user_creds,
+        excel_path=excel_path,
+        table=f"daily-summary",
+        info=f"daily-summary",
+        sheets_service=sheets_service
+    )
 
 def main_upload(drive, user_creds) -> None:
     base_dir = os.getenv("DOWNLOAD_DIR")
-    excel_path: str = f"webshop-{datetime.today().strftime('%Y')}.xlsx"
+    excel_path_overall: str = f"year-{datetime.today().strftime('%Y')}.xlsx"
+    excel_path_daily: str = "days/daily-summary.xlsx"
 
-    file: str = os.path.join(base_dir, excel_path)
+    file_overall: str = os.path.join(base_dir, excel_path_overall)
+    file_daily: str = os.path.join(base_dir, excel_path_daily)
 
-    if not os.path.exists(file):
-        print("File not found:", file)
-        raise FileNotFoundError(file)
+    if not os.path.exists(file_overall):
+        print("File not found:", file_overall)
+        raise FileNotFoundError(file_overall)
 
-    wrapper_upload_to_google_cloud(drive=drive,
-                                   user_creds=user_creds,
-                                   excel_path=file,
-                                   table=f"Reflexshop-Oktobertol",
-                                   info="reflexshop oktobertol"
-                                   )
+    delete_prev_google_drive_files(drive=drive)
 
+    # Build Sheets service once
+    sheets_service = build("sheets", "v4", credentials=user_creds)
 
-    for file in os.listdir("C://Users/marton.aron/Downloads/"):
-        os.remove(os.path.join("C://Users/marton.aron/Downloads/", file))
+    # Upload the YEAR workbook and add Klubtagsag IMPORTRANGE on the Google Sheet
+    wrapper_upload_to_google_cloud(
+        drive=drive,
+        user_creds=user_creds,
+        excel_path=file_overall,
+        table=f"Reflexshop-Oktobertol",
+        info=f"year-{datetime.today().strftime('%Y')}",
+        sheets_service=sheets_service,
+        add_klubtagsag=True,  # <-- this creates the Klubtagsag tab + formula
+        importrange_source_sheet_id=GS_SOURCE_SHEET_ID,
+        importrange_source_range=GS_KLUBTAGSAG_SOURCE_RANGE,
+    )
 
+    wrapper_upload_to_google_cloud(
+        drive=drive,
+        user_creds=user_creds,
+        excel_path=file_daily,
+        table=f"Reflexshop-Napi",
+        info="daily_summary",
+        sheets_service=sheets_service,
+        add_klubtagsag=False
+    )
+
+def clean_local_dir(base_dir: str) -> None:
+    if base_dir and os.path.isdir(base_dir):
+        for file in os.listdir(base_dir):
+            if file == 'days':
+                for f in os.listdir(os.path.join(base_dir, file)):
+                    os.remove(os.path.join(base_dir, file, f))
+            else:
+                os.remove(os.path.join(base_dir, file))
 
 def main():
-    # OAuth user creds with BOTH scopes (Drive + BigQuery)
+    # OAuth user creds with ALL needed scopes (Drive + Sheets + BigQuery)
     user_creds: Credentials = get_oauth_credentials()
 
     # Drive client
     drive = build("drive", "v3", credentials=user_creds)
 
-    # unas_webshops_upload(drive=drive, user_creds=user_creds, exclude_webshop=[''])
+    # Build Sheets service once
+    sheets_service = build("sheets", "v4", credentials=user_creds)
+    #
+    # create_table_pointing_to_yearly_summary(drive, user_creds, sheets_service)
+    #
+    # create_table_pointing_to_daily_summary(drive, user_creds, sheets_service)
 
-    main_upload(drive=drive, user_creds=user_creds)
+    main_upload(drive, user_creds)
 
 if __name__ == "__main__":
     main()
