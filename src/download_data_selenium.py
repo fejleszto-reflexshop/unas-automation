@@ -11,22 +11,15 @@ from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from dotenv import load_dotenv
 
-# =========================
-#         CONFIG
-# =========================
 load_dotenv()
 UNAS_URL = os.getenv("UNAS_URL")
 UNAS_USERNAME_LOGIN = os.getenv("UNAS_USERNAME_LOGIN")
 UNAS_PASSWORD_LOGIN = os.getenv("UNAS_PASSWORD_LOGIN")
 
-VIEW_PAUSE = 0.35  # small pauses so you can watch changes
-
 options = Options()
-options.add_experimental_option("detach", True)  # keep browser open
-options.headless = False
+options.add_argument("--headless")
 
 driver = webdriver.Chrome(options=options)
-driver.maximize_window()
 wait = WebDriverWait(driver, 15)
 
 # =========================
@@ -49,8 +42,8 @@ DATE_END_INPUT   = (By.XPATH, '/html/body/div[1]/div/div[2]/div[2]/div[1]/div[4]
 XLSX_RADIO = (By.XPATH, '//*[@id="format_1"]')
 EXPORT_SUBMIT = (By.XPATH, '//*[@id="button_export"]/button')
 
-
 def open_browser() -> None:
+    print("Opening browser...", UNAS_URL, sep='\n')
     driver.get(UNAS_URL)
 
 
@@ -80,7 +73,6 @@ def close_cookies_once():
 
 def highlight(el, color="#ff4d4f"):
     driver.execute_script("arguments[0].style.boxShadow='0 0 0 3px '+arguments[1];", el, color)
-    time.sleep(VIEW_PAUSE)
 
 
 def unhighlight(el):
@@ -118,7 +110,6 @@ def set_date_resilient(locator, dt: datetime, label="date"):
             el.dispatchEvent(new Event('change', {bubbles:true}));
             el.blur();
         """, el, iso)
-        time.sleep(VIEW_PAUSE)
 
         if (el.get_attribute("value") or "") == iso:
             print(f"[{label}] set as ISO OK ->", iso)
@@ -134,7 +125,6 @@ def set_date_resilient(locator, dt: datetime, label="date"):
         el.dispatchEvent(new Event('change', {bubbles:true}));
         el.blur();
     """, el, hu)
-    time.sleep(VIEW_PAUSE)
 
     if (el.get_attribute("value") or "") == hu:
         print(f"[{label}] set as HU masked OK ->", hu)
@@ -160,7 +150,6 @@ def set_date_resilient(locator, dt: datetime, label="date"):
         el.dispatchEvent(new Event('change', {bubbles:true}));
         el.blur();
     """, el, hu, iso)
-    time.sleep(VIEW_PAUSE)
 
     v = el.get_attribute("value") or ""
     print(f"[{label}] after hidden-pair attempt -> '{v}'")
@@ -169,6 +158,8 @@ def set_date_resilient(locator, dt: datetime, label="date"):
 
 def login() -> None:
     close_cookies_once()
+
+    print("Logging in...")
 
     user = wait.until(EC.presence_of_element_located(USER_INPUT))
     user.clear()
@@ -190,147 +181,82 @@ def login() -> None:
     enter_btn.click()
 
 
-# =========================
-#   SHOP SWITCHING (XPath)
-# =========================
-def _open_user_dropdown_and_get_select():
+TOOLTIP_VISIBLE_SELECT = (
+    By.XPATH,
+    "//div[contains(@class,'tippy-box') and contains(@data-state,'visible')]//label/select"
+)
+
+USER_MENU_BTN = (By.ID, "user_button")  # simplify
+
+def open_user_menu() -> None:
+    btn = wait.until(EC.visibility_of_element_located(USER_MENU_BTN))
+    ActionChains(driver).move_to_element(btn).perform()
+    wait.until(EC.presence_of_element_located(TOOLTIP_VISIBLE_SELECT))
+
+    print("User menu opened.")
+
+def list_other_webshops(exclude_webshops: list[str]) -> list[str]:
     """
-    Opens the Tippy dropdown and returns the VISIBLE <select> inside the popup
-    using XPath with starts-with(@id,'tippy-').
+    Return a deduped list of webshop names (strings) from the visible optgroup,
+    excluding any in 'exclude_webshops'.
     """
-    choose_webshop_btn = wait.until(
-        EC.element_to_be_clickable((By.XPATH, '/html/body/div[1]/div/div[2]/div[1]/div/div[2]/div[2]/button'))
-    )
-    # slight hover helps with some tippy setups
-    ActionChains(driver).move_to_element(choose_webshop_btn).pause(0.1).perform()
-    choose_webshop_btn.click()  # click is more stable than hover
+    open_user_menu()
+    sel_el = wait.until(EC.presence_of_element_located(TOOLTIP_VISIBLE_SELECT))
+    sel = Select(sel_el)
 
-    # visible tippy → select with the subscription_menu_login handler
-    tippy_select_xpath = (
-        "//div[starts-with(@id,'tippy-') and not(contains(@style,'display: none'))]"
-        "//div[contains(@class,'tippy-content')]"
-        "//select[contains(@onchange,'subscription_menu_login')]"
-    )
+    names: list[str] = []
+    for opt in sel.options:
+        txt = (opt.text or "").strip()
+        if txt and txt.lower() not in {e.lower() for e in exclude_webshops}:
+            names.append(txt)
 
-    sels = wait.until(EC.presence_of_all_elements_located((By.XPATH, tippy_select_xpath)))
-    for s in sels:
-        if s.is_displayed():
-            return s
+    # keep order, remove dupes
+    seen = set()
+    out = []
+    for n in names:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
 
-    return wait.until(EC.visibility_of_element_located((By.XPATH, tippy_select_xpath)))
+    return out
 
-
-def _collect_shops_from_dropdown():
+def select_webshop_by_text(name: str, retries: int = 3) -> None:
     """
-    Returns a list of (label, text, value_json_str) for all options within optgroups.
-    Uses the visible Tippy dropdown.
+    Re-open the menu and select the webshop by visible text, handling staleness.
     """
-    sel = _open_user_dropdown_and_get_select()
-
-    shops = []
-    groups = sel.find_elements(By.XPATH, ".//optgroup")
-    for g in groups:
-        label = g.get_attribute("label") or ""
-        options = g.find_elements(By.XPATH, ".//option")
-        for opt in options:
-            text = opt.text.strip()
-            value = opt.get_attribute("value")
-            if text and text.lower() != "válassz szolgáltatást":
-                shops.append((label, text, value))
-
-    # close popup by clicking page background to avoid overlay issues
-    driver.find_element(By.TAG_NAME, "body").click()
-    return shops
-
-
-# =========================
-#  HIDDEN TEMPLATE FALLBACK
-# =========================
-def _collect_shops_from_hidden_template():
-    """
-    Reads options from the hidden #user_menu template (bypassing Tippy timing).
-    Returns [(label, text, value_json_str), ...]
-    """
-    hidden_select = wait.until(
-        EC.presence_of_element_located((By.XPATH, "//*[@id='user_menu']//select[contains(@onchange,'subscription_menu_login')]"))
-    )
-    shops = []
-    for g in hidden_select.find_elements(By.XPATH, ".//optgroup"):
-        label = g.get_attribute("label") or ""
-        for opt in g.find_elements(By.XPATH, ".//option"):
-            text = opt.text.strip()
-            value = opt.get_attribute("value")
-            if text and text.lower() != "válassz szolgáltatást":
-                shops.append((label, text, value))
-    return shops
-
-
-def _switch_to_shop(shop_visible_text: str):
-    old_root = driver.find_element(By.TAG_NAME, "html")
-
-    sel = _open_user_dropdown_and_get_select()
-    Select(sel).select_by_visible_text(shop_visible_text)
-
-    # ensure onchange runs
-    driver.execute_script(
-        "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));", sel
-    )
-
-    try:
-        wait.until(EC.staleness_of(old_root))
-    except TimeoutException:
-        time.sleep(0.8)
-
-    wait.until(EC.element_to_be_clickable(ORDERS_BUTTON))
-
-def _slug_from_domain(domain_text: str) -> str:
-    return domain_text.split(".", 1)[0]
-
+    last_err = None
+    for _ in range(retries):
+        try:
+            open_user_menu()
+            sel_el = wait.until(EC.element_to_be_clickable(TOOLTIP_VISIBLE_SELECT))
+            Select(sel_el).select_by_visible_text(name)
+            time.sleep(0.2)
+            return
+        except (StaleElementReferenceException, TimeoutException) as e:
+            last_err = e
+            time.sleep(0.2)
+    if last_err:
+        raise last_err
 
 def download_other_webshop_orders() -> None:
-    """
-    Build the shop list (hidden-template first; if fails, use visible popup via XPath),
-    then iterate: switch → download → next. Excludes a few domains.
-    """
-    exclude_webshops: list[str] = "aquadragons.hu moluk.hu ugears.hu".split()
+    exclude_webshops = ["aquadragons.hu", "moluk.hu", "ugears.hu"]
     visited: set[str] = set()
 
-    time.sleep(0.2)
-    html = driver.find_element('tag name', 'html')
-    html.send_keys(Keys.PAGE_UP)
-    html.send_keys(Keys.PAGE_UP)
-    time.sleep(0.2)
+    targets = list_other_webshops(exclude_webshops=exclude_webshops)
 
-    webshop_btn = wait.until(
-        EC.presence_of_element_located((By.XPATH, '//*[@id="user_button"]'))
-    )
+    for idx, name in enumerate(targets):
+        if name in visited:
+            continue
+        visited.add(name)
 
-    ActionChains(driver).move_to_element(webshop_btn).perform()
-
-    webshop_optgroup = wait.until(
-        EC.presence_of_element_located((By.XPATH, '//*[@id="tippy-4"]/div/div/div/div[2]/label/select'))
-    )
-
-    # todo: get all webshops what is needed, maybe loop through optgroup
-    sel = wait.until(
-        EC.presence_of_element_located((By.XPATH, '//*[@id="tippy-4"]/div/div/div/div[2]/label/select/optgroup/option[3]'))
-    )
-
-    sel.click()
-
-    open_orders_and_download_data("okostojasjatek")
-
-
-def download_reflexshop_orders() -> None:
-    open_orders_and_download_data("reflexshop")
+        select_webshop_by_text(name)
+        open_orders_and_download_data(name)
 
 
 def open_orders_and_download_data(webshop: str) -> None:
-    order_btn = wait.until(EC.visibility_of_element_located(ORDERS_BUTTON))
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", order_btn)
-    ActionChains(driver).move_to_element(order_btn).perform()
-
     driver.get('https://shop.unas.hu/admin_order_export.php')
+
+    print("Downloading orders...")
 
     time.sleep(0.2)
     html = driver.find_element('tag name', 'html')
@@ -343,20 +269,15 @@ def open_orders_and_download_data(webshop: str) -> None:
 
     daily_stats(select_data_type=select_data_type, webshop=webshop)
 
-    move_daily_to_other_dir(webshop)
-
-    # year_stats(select_data_type=select_data_type, webshop=webshop)
+    year_stats(select_data_type=select_data_type, webshop=webshop)
 
 
 def daily_stats(webshop: str, select_data_type=None) -> None:
-    Select(select_data_type).select_by_index(1)  # first option
-
+    Select(select_data_type).select_by_index(1)  # daily
     start_date = date(2025, 10, 11)
     with open("../start_date.txt", "w") as f:
         f.write(start_date.strftime("%Y-%m-%d"))
-
     end_date = date.today()
-
     dates = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
 
     for date_ in dates:
@@ -364,39 +285,19 @@ def daily_stats(webshop: str, select_data_type=None) -> None:
         select_xlsx_format()
         download_file()
 
-    move_daily_to_other_dir(webshop)
-
-
-def move_daily_to_other_dir(webshop: str) -> None:
-    for file in os.listdir(os.getenv("DOWNLOAD_DIR")):
-        if file.endswith(".xlsx") and file.find(webshop) != -1:
-            os.makedirs(os.path.join(os.getenv("DOWNLOAD_DIR"), "days", webshop), exist_ok=True)
-
-            os.rename(
-                os.path.join(os.getenv("DOWNLOAD_DIR"), file),
-                os.path.join(os.getenv("DOWNLOAD_DIR"), "days", webshop, file)
-            )
-
-
-def is_excel_files_exist() -> bool:
-    for file in os.listdir(os.getenv("DOWNLOAD_DIR")):
-        if file.endswith(".xlsx"):
-            return True
-    return False
+    print("Daily stats exported.", webshop, sep='\t')
 
 
 def year_stats(webshop: str, select_data_type=None) -> None:
-    Select(select_data_type).select_by_index(0)
-
+    Select(select_data_type).select_by_index(0)  # yearly
     today = datetime.now()
     from_october_or_january = datetime(year=today.year, month=10 if today.year == 2025 else 1, day=1)
-
-    while is_excel_files_exist():
-        move_daily_to_other_dir(webshop)
 
     set_date(date_start=from_october_or_january, date_end=today)
     select_xlsx_format()
     download_file()
+
+    print("Year stats exported.", webshop, sep='\t')
 
 
 def set_date(date_start, date_end) -> None:
@@ -417,16 +318,18 @@ def download_file() -> None:
     download_btn.click()
 
 
-# =========================
-#          MAIN
-# =========================
 def main() -> None:
+    print("Start!")
+
     open_browser()
     login()
-    # download_reflexshop_orders()
-    time.sleep(2)  # small breather if you like
     download_other_webshop_orders()
+
+    print("All done!")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        driver.quit()
