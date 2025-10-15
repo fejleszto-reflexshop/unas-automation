@@ -274,7 +274,7 @@ def open_orders_and_download_data(webshop: str) -> None:
 
 def daily_stats(webshop: str, select_data_type=None) -> None:
     Select(select_data_type).select_by_index(1)  # daily
-    start_date = date(2025, 10, 11)
+    start_date = date(2025, 10, 13)
     with open("../start_date.txt", "w") as f:
         f.write(start_date.strftime("%Y-%m-%d"))
     end_date = date.today()

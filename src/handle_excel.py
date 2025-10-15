@@ -20,20 +20,81 @@ def rename_excel(excel_path: str, to: str) -> None:
     os.rename(excel_path, to)
 
 def filter_excel(excel_path: str) -> None:
-    keep_cols: list[str] = [
+    """
+    Keep only required columns and ensure 'Termék egységára' exists.
+    - Renames various 'nettó ár' variants to 'Termék egységára'.
+    - If no direct unit-price column exists, computes it from 'Nettó Összesen' / 'Mennyiség' when available.
+    """
+    import unicodedata
+    import pandas as pd
+    import numpy as np
+
+    def norm(s: str) -> str:
+        if s is None:
+            return ""
+        s = unicodedata.normalize("NFKC", str(s))
+        s = s.replace("\u00A0", " ")  # non-breaking space -> normal space
+        return s.strip().lower()
+
+    # columns we ultimately want to keep (with final display names)
+    desired_cols = [
         "Rendelés szám", "Vásárló csoport", "E-mail", "Dátum",
         "Szállítási Mód", "Fizetési Mód", "Megrendelés státusz",
         "Száll. Város", "Száll. Ir.", "Száll. Ország", "Adószám",
         "Szállítási Díj", "Kezelési Költség", "Kedvezmény",
-        "Termék Név", "Cikkszám", "Mennyiség", "Nettó Ár"
+        "Termék Név", "Cikkszám", "Mennyiség", "Termék egységára",  # <- final name here
+        "Nettó Összesen"  # keep if you use it in summaries
     ]
 
+    # possible aliases for the unit net price in source files
+    unit_price_aliases = {
+        "nettó ár", "netto ár", "netto ar", "nettó ar",
+        "nettó egységár", "egységár (nettó)", "egysegar (netto)",
+        "unit net price", "net unit price", "unit price (net)"
+    }
+
     df = pd.read_excel(excel_path)
-    df = df[[c for c in keep_cols if c in df.columns]]
-    if "Nettó Ár" in df.columns:
-        df.rename(columns={"Nettó Ár": "Termék egységára"}, inplace=True)
-    # Optional: add webshop later if needed
+
+    # Map normalized header -> original header
+    norm_to_orig = {norm(c): c for c in df.columns}
+
+    # 1) Find a unit net price column
+    unit_col_orig = None
+    for alias in unit_price_aliases:
+        if alias in norm_to_orig:
+            unit_col_orig = norm_to_orig[alias]
+            break
+
+    # 2) If found: rename it to 'Termék egységára'
+    if unit_col_orig:
+        if unit_col_orig != "Termék egységára":
+            df.rename(columns={unit_col_orig: "Termék egységára"}, inplace=True)
+    else:
+        # 3) If not found: try to compute from Nettó Összesen / Mennyiség
+        sum_col = norm_to_orig.get("nettó összesen") or norm_to_orig.get("netto osszesen") or norm_to_orig.get("netto összesen")
+        qty_col = norm_to_orig.get("mennyiség") or norm_to_orig.get("mennyiseg")
+        if sum_col and qty_col:
+            with np.errstate(all="ignore"):
+                df["Termék egységára"] = pd.to_numeric(df[sum_col], errors="coerce") / pd.to_numeric(df[qty_col], errors="coerce")
+        else:
+            # If neither source nor computable, at least create empty column so it's present
+            df["Termék egységára"] = np.nan
+
+    # 4) Keep only desired columns that actually exist (avoid KeyError)
+    keep = [c for c in desired_cols if c in df.columns]
+    df = df[keep]
+
+    # 🔹 Replace empty 'Vásárló csoport' with '|'
+    vc = "Vásárló csoport"
+    if vc in df.columns:
+        mask = df[vc].isna() | (df[vc].astype(str).str.strip() == "")
+        df.loc[mask, vc] = "|"
+
+    df['Bolt neve'] = 'Reflexshop'
+
+    # 5) Save back
     df.to_excel(excel_path, index=False)
+
 
 def summarize_orders_into_excel(path: str) -> pd.DataFrame:
     df = pd.read_excel(path)
@@ -123,8 +184,8 @@ def move_files_into_webshop_folders() -> None:
 
         # Rename each file to day-YYYY-MM-DD.xlsx with decreasing dates
         for idx, fname in enumerate(xlsx_files):
-            target_date = today - timedelta(days=idx-1)  # today, yesterday, ...
-            base_date = target_date.isoformat()        # YYYY-MM-DD
+            target_date = today - timedelta(days=idx-1)  # keep your original logic
+            base_date = target_date.isoformat()          # YYYY-MM-DD
             new_base = f"day-{base_date}"
             new_name = f"{new_base}.xlsx"
 
@@ -165,6 +226,10 @@ def move_files_into_webshop_folders() -> None:
                 if os.path.exists(year_path):
                     os.remove(year_path)
                 os.rename(largest_path, year_path)
+
+                # 🔹 FILTER the year file too
+                filter_excel(year_path)
+
                 # Ensure the year sheet name is the current year
                 try:
                     wb = load_workbook(year_path)
@@ -173,19 +238,20 @@ def move_files_into_webshop_folders() -> None:
                     print(f"⚠️ Year sheet rename skipped for {year_path}: {e}")
                 print(f"🏷️  {folder}: '{os.path.basename(largest_path)}' → '{year_name}'")
 
+        # 4) Create daily-summary.xlsx from all filtered day-*.xlsx in this folder
         merge_all_daily_summaries(folder_path)
-
 
 def delete_unnecessary_files(download_dir: str) -> None:
     for folder in os.listdir(download_dir):
-        for file in os.listdir(os.path.join(download_dir, folder)):
-            if file.startswith('day'):
-                os.remove(os.path.join(download_dir, folder, file))
-
+        folder_path = os.path.join(download_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        for file in os.listdir(folder_path):
+            if file.startswith('day-') and file.lower().endswith(".xlsx"):
+                os.remove(os.path.join(folder_path, file))
 
 def main() -> None:
     move_files_into_webshop_folders()
-
     delete_unnecessary_files(download_folder)
 
 if __name__ == "__main__":
