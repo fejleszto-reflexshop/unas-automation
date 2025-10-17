@@ -1,26 +1,53 @@
 import os
 import time
+import glob
+import logging
 from datetime import datetime, date, timedelta
 
 from selenium import webdriver
 from selenium.webdriver import Keys, ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.remote.client_config import ClientConfig
+from selenium.webdriver.remote.remote_connection import RemoteConnection
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 from dotenv import load_dotenv
 
+# ----------------------------
+# Logging setup
+# ----------------------------
+log_path = os.path.join(os.path.dirname(__file__), f"selenium_{time.strftime('%Y-%m-%d_%H-%M')}.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    handlers=[
+        logging.FileHandler(log_path, encoding="utf-8", mode='a'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info("Logging initialized -> %s", log_path)
+
+# ----------------------------
+# Environment
+# ----------------------------
 load_dotenv()
 UNAS_URL = os.getenv("UNAS_URL")
 UNAS_USERNAME_LOGIN = os.getenv("UNAS_USERNAME_LOGIN")
 UNAS_PASSWORD_LOGIN = os.getenv("UNAS_PASSWORD_LOGIN")
 
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR") or os.path.join(os.path.expanduser("~"), "Downloads")
+
 options = Options()
-options.add_argument("--headless")
+# options.add_argument("--headless=new")  # modern headless
+options.add_experimental_option("detach", True)
 
 driver = webdriver.Chrome(options=options)
-wait = WebDriverWait(driver, 15)
+driver.maximize_window()
+driver.command_executor.set_timeout(1000)
+wait = WebDriverWait(driver, 100)
 
 # =========================
 #       LOCATORS
@@ -43,7 +70,7 @@ XLSX_RADIO = (By.XPATH, '//*[@id="format_1"]')
 EXPORT_SUBMIT = (By.XPATH, '//*[@id="button_export"]/button')
 
 def open_browser() -> None:
-    print("Opening browser...", UNAS_URL, sep='\n')
+    logger.info("Opening browser... %s", UNAS_URL)
     driver.get(UNAS_URL)
 
 
@@ -80,12 +107,6 @@ def unhighlight(el):
 
 
 def set_date_resilient(locator, dt: datetime, label="date"):
-    """
-    Robustly set a date input that may be either:
-      - <input type="date"> -> needs YYYY-MM-DD
-      - masked text input with HU placeholder 'éééé. hh. nn.' -> needs 'YYYY. MM. DD.'
-    Handles non-breaking spaces and hidden paired inputs; fires input/change/blur.
-    """
     el = wait.until(EC.presence_of_element_located(locator))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
     highlight(el)
@@ -99,7 +120,6 @@ def set_date_resilient(locator, dt: datetime, label="date"):
     iso = dt.strftime("%Y-%m-%d")
     hu  = dt.strftime(f"%Y.{space_char} %m.{space_char} %d.")
 
-    # --- Strategy A: native <input type="date">
     if input_type == "date":
         driver.execute_script("""
             const el = arguments[0], v = arguments[1];
@@ -112,11 +132,10 @@ def set_date_resilient(locator, dt: datetime, label="date"):
         """, el, iso)
 
         if (el.get_attribute("value") or "") == iso:
-            print(f"[{label}] set as ISO OK ->", iso)
+            logger.info("[%s] set as ISO OK -> %s", label, iso)
             unhighlight(el)
             return
 
-    # --- Strategy B: masked HU text input
     driver.execute_script("""
         const el = arguments[0], v = arguments[1];
         el.focus();
@@ -127,24 +146,21 @@ def set_date_resilient(locator, dt: datetime, label="date"):
     """, el, hu)
 
     if (el.get_attribute("value") or "") == hu:
-        print(f"[{label}] set as HU masked OK ->", hu)
+        logger.info("[%s] set as HU masked OK -> %s", label, hu)
         unhighlight(el)
         return
 
-    # --- Strategy C: update a hidden paired input next to visible one
     driver.execute_script("""
         const el = arguments[0], hu = arguments[1], iso = arguments[2];
         const root = el.closest('label') || el.parentElement;
         if (root) {
             const hidden = root.querySelector('input[type="hidden"], input[data-hidden="true"]');
             if (hidden) {
-                // prefer ISO for model fields
                 hidden.value = iso;
                 hidden.dispatchEvent(new Event('input', {bubbles:true}));
                 hidden.dispatchEvent(new Event('change', {bubbles:true}));
             }
         }
-        // also re-apply visible for UX
         el.value = hu;
         el.dispatchEvent(new Event('input', {bubbles:true}));
         el.dispatchEvent(new Event('change', {bubbles:true}));
@@ -152,14 +168,13 @@ def set_date_resilient(locator, dt: datetime, label="date"):
     """, el, hu, iso)
 
     v = el.get_attribute("value") or ""
-    print(f"[{label}] after hidden-pair attempt -> '{v}'")
+    logger.info("[%s] after hidden-pair attempt -> '%s'", label, v)
     unhighlight(el)
 
 
 def login() -> None:
     close_cookies_once()
-
-    print("Logging in...")
+    logger.info("Logging in...")
 
     user = wait.until(EC.presence_of_element_located(USER_INPUT))
     user.clear()
@@ -174,7 +189,7 @@ def login() -> None:
     close_cookies_once()
 
     select_widget = Select(sel)
-    select_widget.select_by_index(4)  # adjust if needed
+    select_widget.select_by_index(4)
 
     enter_btn = wait.until(EC.element_to_be_clickable(ENTER_BUTTON))
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", enter_btn)
@@ -186,20 +201,16 @@ TOOLTIP_VISIBLE_SELECT = (
     "//div[contains(@class,'tippy-box') and contains(@data-state,'visible')]//label/select"
 )
 
-USER_MENU_BTN = (By.ID, "user_button")  # simplify
+USER_MENU_BTN = (By.ID, "user_button")
 
 def open_user_menu() -> None:
     btn = wait.until(EC.visibility_of_element_located(USER_MENU_BTN))
     ActionChains(driver).move_to_element(btn).perform()
     wait.until(EC.presence_of_element_located(TOOLTIP_VISIBLE_SELECT))
+    logger.info("User menu opened.")
 
-    print("User menu opened.")
 
 def list_other_webshops(exclude_webshops: list[str]) -> list[str]:
-    """
-    Return a deduped list of webshop names (strings) from the visible optgroup,
-    excluding any in 'exclude_webshops'.
-    """
     open_user_menu()
     sel_el = wait.until(EC.presence_of_element_located(TOOLTIP_VISIBLE_SELECT))
     sel = Select(sel_el)
@@ -210,20 +221,16 @@ def list_other_webshops(exclude_webshops: list[str]) -> list[str]:
         if txt and txt.lower() not in {e.lower() for e in exclude_webshops}:
             names.append(txt)
 
-    # keep order, remove dupes
     seen = set()
     out = []
     for n in names:
         if n.lower() not in seen:
             seen.add(n.lower())
             out.append(n)
-
     return out
 
+
 def select_webshop_by_text(name: str, retries: int = 3) -> None:
-    """
-    Re-open the menu and select the webshop by visible text, handling staleness.
-    """
     last_err = None
     for _ in range(retries):
         try:
@@ -238,26 +245,23 @@ def select_webshop_by_text(name: str, retries: int = 3) -> None:
     if last_err:
         raise last_err
 
+
 def download_other_webshop_orders() -> None:
     exclude_webshops = ["aquadragons.hu", "moluk.hu", "ugears.hu"]
     visited: set[str] = set()
-
     targets = list_other_webshops(exclude_webshops=exclude_webshops)
 
     for idx, name in enumerate(targets):
         if name in visited:
             continue
         visited.add(name)
-
         select_webshop_by_text(name)
         open_orders_and_download_data(name)
 
 
 def open_orders_and_download_data(webshop: str) -> None:
     driver.get('https://shop.unas.hu/admin_order_export.php')
-
-    print("Downloading orders...")
-
+    logger.info("Downloading orders...")
     time.sleep(0.2)
     html = driver.find_element('tag name', 'html')
     html.send_keys(Keys.PAGE_DOWN)
@@ -268,40 +272,51 @@ def open_orders_and_download_data(webshop: str) -> None:
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_data_type)
 
     daily_stats(select_data_type=select_data_type, webshop=webshop)
-
     year_stats(select_data_type=select_data_type, webshop=webshop)
 
 
 def daily_stats(webshop: str, select_data_type=None) -> None:
-    Select(select_data_type).select_by_index(1)  # daily
-    start_date = date(2025, 10, 13)
+    Select(select_data_type).select_by_index(1)
+    year = date.today().year
+    month = 10 if date.today().month == 10 else date.today().month
+    start_date = date(year, month, 15)
+
     with open("../start_date.txt", "w") as f:
         f.write(start_date.strftime("%Y-%m-%d"))
+
     end_date = date.today()
     dates = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
 
     for date_ in dates:
         set_date(date_, date_)
+        time.sleep(0.5)
         select_xlsx_format()
+        time.sleep(0.5)
         download_file()
 
-    print("Daily stats exported.", webshop, sep='\t')
+    logger.info("Daily stats exported.\t%s", webshop)
 
 
 def year_stats(webshop: str, select_data_type=None) -> None:
-    Select(select_data_type).select_by_index(0)  # yearly
+    Select(select_data_type).select_by_index(0)
     today = datetime.now()
-    from_october_or_january = datetime(year=today.year, month=10 if today.year == 2025 else 1, day=1)
+    month = today.month - 3
+    year = today.year
+    if month <= 0:
+        month += 12
+        year -= 1
+    from_three_months_ago = datetime(year=year, month=month, day=1)
 
-    set_date(date_start=from_october_or_january, date_end=today)
+    set_date(date_start=from_three_months_ago, date_end=today)
+    time.sleep(0.5)
     select_xlsx_format()
+    time.sleep(0.5)
     download_file()
 
-    print("Year stats exported.", webshop, sep='\t')
+    logger.info("Year stats (last 3 months) exported.\t%s", webshop)
 
 
 def set_date(date_start, date_end) -> None:
-    """ just paste datetime.now() """
     set_date_resilient(DATE_START_INPUT, date_start, label="start")
     set_date_resilient(DATE_END_INPUT, date_end, label="end")
 
@@ -319,17 +334,42 @@ def download_file() -> None:
 
 
 def main() -> None:
-    print("Start!")
-
+    logger.info("Start!")
     open_browser()
     login()
     download_other_webshop_orders()
+    logger.info("All done!")
 
-    print("All done!")
+
+def is_wait_for_the_last_file() -> bool:
+    with open("../start_date.txt", "r") as f:
+        start_str = f.readline().strip()
+    try:
+        start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+    except ValueError:
+        logger.error("Invalid start_date.txt format, expected YYYY-MM-DD.")
+        return False
+
+    today = date.today()
+    expected_files = (today - start_date).days + 2
+    pattern = os.path.join(DOWNLOAD_DIR, "*toymarket*")
+    files = [
+        f for f in glob.glob(pattern)
+        if not f.lower().endswith((".crdownload", ".part", ".tmp", ".temp", ".xlsx"))
+    ]
+    count = len(files)
+    logger.info("ToyMarket files found: %s/%s", count, expected_files)
+    return count >= expected_files
 
 
 if __name__ == "__main__":
     try:
         main()
     finally:
-        driver.quit()
+        if not is_wait_for_the_last_file():
+            logger.info("Waiting: ToyMarket export not complete yet.")
+            time.sleep(2)
+        else:
+            logger.info("All files downloaded. All done!")
+            driver.close()
+            driver.quit()

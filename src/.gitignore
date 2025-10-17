@@ -1,3 +1,11 @@
 __pycache__/
 .idea
 .vscode
+
+unas_actions.py
+unas_helper.py
+popfanatic_actions.py
+
+logs/
+
+*.log
