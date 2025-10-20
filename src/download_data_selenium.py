@@ -344,6 +344,7 @@ def main() -> None:
     logger.info("All done!")
 
 def close_browser() -> None:
+    """ handle unfinished downloads.  """
     select_webshop_by_text("reflexshop.hu")
 
     driver.get("https://shop.unas.hu/admin_start.php")

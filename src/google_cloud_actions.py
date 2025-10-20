@@ -65,8 +65,8 @@ SKIP_ROWS = 1
 AUTO_DETECT_SCHEMA = False
 
 # OAuth files
-CREDENTIALS_FILE = "../credentials.json"
-TOKEN_FILE       = "../token.json"
+CREDENTIALS_FILE = "credentials.json"
+TOKEN_FILE       = "token.json"
 
 # Scopes
 SCOPES = [
@@ -1371,7 +1371,7 @@ if __name__ == "__main__":
         logger.info("Google Drive creds/drive created.")
         today = date.today()
 
-        if today.day == 20:
+        if today.day == 1:
             logger.info("Months data uploaded")
             upload_months_data(drive=drive, user_creds=user_creds)
             upload_year_stats_overall(drive=drive, user_creds=user_creds)
