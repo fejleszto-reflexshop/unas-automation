@@ -5,6 +5,7 @@ from openpyxl import load_workbook
 from dotenv import load_dotenv
 from openpyxl.workbook import Workbook
 import pandas as pd
+import tempfile
 
 # =====================================================
 # Logging setup
@@ -112,8 +113,12 @@ def filter_excel(excel_path: str, webshop_name: str) -> None:
         mask = df[vc].isna() | (df[vc].astype(str).str.strip() == "")
         df.loc[mask, vc] = "|"
 
+    if "Dátum" in df.columns:
+        df["Dátum"] = pd.to_datetime(df["Dátum"], errors="coerce").dt.strftime("%Y.%m").str.replace(r"\.([0-9])$",
+                                                                                                    r".0\1", regex=True)
+
     df["Bolt neve"] = webshop_name
-    df.to_excel(excel_path, index=False)
+    df.to_excel(excel_path, index=False, float_format="%.2f")
     logger.info("Filtered and saved: %s", excel_path)
 
 
@@ -138,6 +143,9 @@ def summarize_orders_into_excel(path: str) -> pd.DataFrame:
         "": ["", ""]
     }, index=["Orders", "Revenue"])
 
+    # Force text with '.' instead of ','
+    out = out.applymap(lambda x: f"{x:.2f}" if isinstance(x, (int, float)) else x)
+
     return out
 
 
@@ -156,8 +164,94 @@ def merge_all_daily_summaries(folder_path: str) -> None:
         all_data = pd.concat([all_data, df_summary], axis=1)
 
     out_path = os.path.join(folder_path, "daily-summary.xlsx")
-    all_data.to_excel(out_path)
+    all_data.to_excel(out_path, float_format="%.2f")
     logger.info("✅ Saved merged summary to %s", out_path)
+
+
+# =====================================================
+# NEW: temp builder + incremental sync
+# =====================================================
+def _atomic_write_xlsx(df: pd.DataFrame, out_path: str) -> None:
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix="daily-summary-", suffix=".xlsx",
+                                        dir=os.path.dirname(out_path) or ".")
+    os.close(tmp_fd)
+    try:
+        df.to_excel(tmp_path, float_format="%.2f")
+        os.replace(tmp_path, out_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def build_daily_summary_temp_df(folder_path: str) -> pd.DataFrame:
+    """
+    Build a temporary DataFrame from all day-*.xlsx in folder_path.
+    Also writes it to 'daily_summary_temp.xlsx' for inspection.
+    """
+    day_files = sorted(
+        [f for f in os.listdir(folder_path)
+         if f.lower().endswith(".xlsx") and f.startswith("day-")]
+    )
+    all_data = pd.DataFrame()
+    for f in day_files:
+        fp = os.path.join(folder_path, f)
+        col = summarize_orders_into_excel(fp)
+        all_data = pd.concat([all_data, col], axis=1)
+
+    # Save temp file
+    temp_path = os.path.join(folder_path, "daily_summary_temp.xlsx")
+    _atomic_write_xlsx(all_data, temp_path)
+    logger.info("🧪 Wrote temporary daily summary to %s", temp_path)
+
+    return all_data
+
+
+def sync_daily_summary_from_temp(folder_path: str) -> None:
+    """
+    If daily-summary.xlsx exists, create daily_summary_temp.xlsx and append any missing
+    day columns (by date) into daily-summary.xlsx (with a blank spacer after each new day).
+    If daily-summary.xlsx doesn't exist, create it from all day-*.xlsx files.
+    """
+    out_path = os.path.join(folder_path, "daily-summary.xlsx")
+
+    temp_df = build_daily_summary_temp_df(folder_path)
+
+    if not os.path.exists(out_path):
+        # No summary yet → write full temp as the initial summary
+        _atomic_write_xlsx(temp_df, out_path)
+        logger.info("🆕 Created daily-summary.xlsx from temp in %s", folder_path)
+        return
+
+    # Load existing summary (keep index so 'Orders/Revenue' align)
+    existing = pd.read_excel(out_path, index_col=0)
+
+    # Identify day columns in temp (exclude blank spacer column name "")
+    temp_cols = list(temp_df.columns)
+    day_cols = [c for c in temp_cols if c != ""]
+
+    # Determine which day columns are missing from existing
+    missing_days = [d for d in day_cols if d not in existing.columns]
+
+    if not missing_days:
+        logger.info("ℹ️ No new days to append in %s", folder_path)
+        return
+
+    # Build a DataFrame to append: for each missing day, add the day column and a new blank spacer
+    pieces = []
+    for d in missing_days:
+        day_part = temp_df[[d]]
+        spacer = pd.DataFrame({"": ["", ""]}, index=day_part.index)
+        pair = pd.concat([day_part, spacer], axis=1)
+        pieces.append(pair)
+
+    to_append = pd.concat(pieces, axis=1) if pieces else pd.DataFrame(index=existing.index)
+
+    combined = pd.concat([existing, to_append], axis=1)
+    _atomic_write_xlsx(combined, out_path)
+    logger.info("➕ Appended %d new day(s) to %s", len(missing_days), out_path)
 
 
 # =====================================================
@@ -202,6 +296,8 @@ def move_files_into_webshop_folders() -> None:
             and f.lower() != "daily-summary.xlsx"
         ]
         if not xlsx_files:
+            # still try to sync summary (in case day- files already present)
+            sync_daily_summary_from_temp(folder_path)
             continue
 
         xlsx_files.sort(key=lambda f: os.path.getmtime(os.path.join(folder_path, f)), reverse=True)
@@ -256,9 +352,10 @@ def move_files_into_webshop_folders() -> None:
                     rename_excel_sheet(wb, str(today.year), year_path)
                 except Exception as e:
                     logger.warning("⚠️ Year sheet rename skipped for %s: %s", year_path, e)
-                logger.info("🏷️  %s: '%s' → '%s'", folder, os.path.basename(largest_path), year_name)
+                logger.info("🏷️ %s: '%s' → '%s'", folder, os.path.basename(largest_path), year_name)
 
-        merge_all_daily_summaries(folder_path)
+        # 🔁 NEW: Incremental sync using temp vs existing
+        sync_daily_summary_from_temp(folder_path)
 
 
 def delete_unnecessary_files(download_dir: str) -> None:
@@ -272,86 +369,12 @@ def delete_unnecessary_files(download_dir: str) -> None:
                 os.remove(os.path.join(folder_path, file))
                 logger.info("🗑️ Deleted temporary file: %s/%s", folder, file)
 
-DATE_COL = "Dátum"
-SHIP_COL = "Szállítási Mód"
-QTY_COL  = "Mennyiség"
-SHEET_PIVOT = "Kimutatasok"   # ide csak a pivot megy
-SHEET_DETAIL = "Reszletek"    # ide a hosszú tábla, ha kell
+            if file.find('temp') != -1 and file.endswith('.xlsx'):
+                os.remove(os.path.join(folder_path, file))
+                logger.info("Deleted temporary file: %s/%s", folder, file)
 
-def create_kimutatasok() -> None:
-    base = os.getenv("DOWNLOAD_DIR")
-    if not base or not os.path.isdir(base):
-        raise RuntimeError("DOWNLOAD_DIR nincs beállítva vagy nem létező mappa.")
-
-    for folder in os.listdir(base):
-        folder_path = os.path.join(base, folder)
-        if not os.path.isdir(folder_path):
-            continue  # csak mappák
-
-        input_path = os.path.join(folder_path, f'year-{datetime.now().year}.xlsx')
-        output_path = os.path.join(folder_path, 'kimutatasok.xlsx')
-        if not os.path.exists(input_path):
-            continue
-
-        df = pd.read_excel(input_path)
-
-        # kötelező oszlopok
-        for col in [DATE_COL, SHIP_COL, QTY_COL]:
-            if col not in df.columns:
-                raise ValueError(f"Hiányzó oszlop: {col} a fájlban: {input_path}")
-
-        # tisztítás
-        df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
-        df = df.dropna(subset=[DATE_COL])
-        df[QTY_COL] = pd.to_numeric(df[QTY_COL], errors="coerce").fillna(0).astype(int)
-        df[SHIP_COL] = df[SHIP_COL].fillna("Ismeretlen")
-
-        # hónap
-        df["Hónap"] = df[DATE_COL].dt.to_period("M").astype(str)
-
-        # PIVOT: sorok = szállítási mód, oszlopok = hónapok, érték = mennyiség összege
-        pivot = pd.pivot_table(
-            df,
-            index=SHIP_COL,
-            columns="Hónap",
-            values=QTY_COL,
-            aggfunc="sum",
-            fill_value=0,
-            margins=True,            # ha nem kell összesen: állítsd False-ra és töröld a rendezést alább
-            margins_name="Összesen"
-        )
-
-        # hónap oszlopok kronologikus rendezése, Összesen a végére
-        months = [c for c in pivot.columns if c != "Összesen"]
-        months_sorted = sorted(months)  # 'YYYY-MM' jól rendezhető
-        if "Összesen" in pivot.columns:
-            months_sorted += ["Összesen"]
-        pivot = pivot[months_sorted]
-
-        # sorok ABC szerint, Összesen a végére
-        rows = [r for r in pivot.index if r != "Összesen"]
-        rows_sorted = sorted(rows)
-        if "Összesen" in pivot.index:
-            rows_sorted += ["Összesen"]
-        pivot = pivot.loc[rows_sorted]
-
-        # opcionális: hosszú tábla külön lapra (hasznos grafikonhoz)
-        detail = (
-            df.groupby([SHIP_COL, "Hónap"], dropna=False, as_index=False)[QTY_COL]
-              .sum()
-              .rename(columns={QTY_COL: "Össz_darab"})
-              .sort_values([SHIP_COL, "Hónap"])
-        )
-
-        # Írás: pivot és detail KÜLÖN lapokra
-        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            pivot.to_excel(writer, sheet_name=SHEET_PIVOT)
-            detail.to_excel(writer, sheet_name=SHEET_DETAIL, index=False)
-
-        print(f"✅ Kész: {output_path}")
 
 def main() -> None:
-    """Main entry point: organize Excel exports and clean up."""
     logger.info("=== Starting Excel file organization ===")
     move_files_into_webshop_folders()
     delete_unnecessary_files(download_folder)
@@ -360,4 +383,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    # create_kimutatasok()

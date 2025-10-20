@@ -1,6 +1,5 @@
 import os
 import time
-import glob
 import logging
 from datetime import datetime, date, timedelta
 
@@ -8,8 +7,6 @@ from selenium import webdriver
 from selenium.webdriver import Keys, ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.remote.client_config import ClientConfig
-from selenium.webdriver.remote.remote_connection import RemoteConnection
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
@@ -18,7 +15,10 @@ from dotenv import load_dotenv
 # ----------------------------
 # Logging setup
 # ----------------------------
-log_path = os.path.join(os.path.dirname(__file__), f"selenium_{time.strftime('%Y-%m-%d_%H-%M')}.log")
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+log_path = os.path.join(LOG_DIR, f"selenium_{datetime.now().strftime('%Y-%m-%d')}.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -272,17 +272,18 @@ def open_orders_and_download_data(webshop: str) -> None:
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", select_data_type)
 
     daily_stats(select_data_type=select_data_type, webshop=webshop)
+
     year_stats(select_data_type=select_data_type, webshop=webshop)
 
 
 def daily_stats(webshop: str, select_data_type=None) -> None:
     Select(select_data_type).select_by_index(1)
-    year = date.today().year
-    month = 10 if date.today().month == 10 else date.today().month
-    start_date = date(year, month, 15)
+    today = date.today()
+    year = today.year
+    month = today.month
+    day = today.day
 
-    with open("../start_date.txt", "w") as f:
-        f.write(start_date.strftime("%Y-%m-%d"))
+    start_date = date(year, month, day)
 
     end_date = date.today()
     dates = [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
@@ -302,12 +303,14 @@ def year_stats(webshop: str, select_data_type=None) -> None:
     today = datetime.now()
     month = today.month - 3
     year = today.year
+
     if month <= 0:
         month += 12
         year -= 1
+
     from_three_months_ago = datetime(year=year, month=month, day=1)
 
-    set_date(date_start=from_three_months_ago, date_end=today)
+    set_date(date_start=from_three_months_ago, date_end=datetime(year=today.year, month=today.month, day=1))
     time.sleep(0.5)
     select_xlsx_format()
     time.sleep(0.5)
@@ -340,36 +343,18 @@ def main() -> None:
     download_other_webshop_orders()
     logger.info("All done!")
 
+def close_browser() -> None:
+    select_webshop_by_text("reflexshop.hu")
 
-def is_wait_for_the_last_file() -> bool:
-    with open("../start_date.txt", "r") as f:
-        start_str = f.readline().strip()
-    try:
-        start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
-    except ValueError:
-        logger.error("Invalid start_date.txt format, expected YYYY-MM-DD.")
-        return False
+    driver.get("https://shop.unas.hu/admin_start.php")
+    driver.close()
+    driver.quit()
 
-    today = date.today()
-    expected_files = (today - start_date).days + 2
-    pattern = os.path.join(DOWNLOAD_DIR, "*toymarket*")
-    files = [
-        f for f in glob.glob(pattern)
-        if not f.lower().endswith((".crdownload", ".part", ".tmp", ".temp", ".xlsx"))
-    ]
-    count = len(files)
-    logger.info("ToyMarket files found: %s/%s", count, expected_files)
-    return count >= expected_files
+    logger.info("Browser closed.")
 
 
 if __name__ == "__main__":
     try:
         main()
     finally:
-        if not is_wait_for_the_last_file():
-            logger.info("Waiting: ToyMarket export not complete yet.")
-            time.sleep(2)
-        else:
-            logger.info("All files downloaded. All done!")
-            driver.close()
-            driver.quit()
+        close_browser()

@@ -7,3 +7,4 @@ stats
 token.txt
 start_date.txt
 .env
+logs/
