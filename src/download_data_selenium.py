@@ -344,7 +344,7 @@ def main() -> None:
     logger.info("All done!")
 
 def close_browser() -> None:
-    """ handle unfinished downloads.  """
+    """ handle unfinished downloads by visiting another webshop lol.  """
     select_webshop_by_text("reflexshop.hu")
 
     driver.get("https://shop.unas.hu/admin_start.php")
@@ -357,5 +357,9 @@ def close_browser() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except Exception as e:
+        logger.exception("Something went wrong. %s", e)
+        driver.close()
+        driver.quit()
     finally:
         close_browser()
